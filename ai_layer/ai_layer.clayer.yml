@@ -3,7 +3,7 @@
 # model/model.py or the csolution's mlops: node.
 layer:
   type: AI
-  description: TinyCNN int8 image classifier for Ethos-U85
+  description: Face generator (int8) for Ethos-U85
 
   packs:
     - pack: PyTorch::ExecuTorch@1.5.1
@@ -23,7 +23,7 @@ layer:
     - component: Machine Learning:ExecuTorch Operators:Quantized quantize
 
   groups:
-    - group: TinyCNN
+    - group: FaceDecoder
       files:
         - file: ./model_pte.c
         - file: ./model_pte.h

@@ -58,7 +58,44 @@ constexpr size_t kTempPoolSize = APP_TEMP_POOL_SIZE;
 alignas(16) uint8_t g_method_pool[kMethodPoolSize] APP_POOL_ATTRIBUTES;
 alignas(16) uint8_t g_temp_pool[kTempPoolSize] APP_POOL_ATTRIBUTES;
 
+constexpr size_t kLatent = 16;
+constexpr size_t kFacePixels = 32 * 32;
+
+alignas(16) float g_latent[kLatent];  // the decoder's input buffer
+EmbeddedModule* g_module = nullptr;
+Tensor* g_input = nullptr;
+
 }  // namespace
+
+// Provided by the board layer when it defines BOARD_FACE_DEMO.
+#ifdef BOARD_FACE_DEMO
+extern "C" void face_demo_loop(void);
+#endif
+
+// Runs the decoder on the NPU: 16 latent values in, 32x32 8-bit pixels out.
+// Returns 0 on success.
+extern "C" int face_generate(const float* latent, uint8_t* pixels) {
+  if (g_module == nullptr || g_input == nullptr) {
+    return -1;
+  }
+  for (size_t i = 0; i < kLatent; ++i) {
+    g_latent[i] = latent[i];
+  }
+  auto outputs = g_module->forward(*g_input);
+  if (!outputs.ok() || outputs->empty() || !outputs->front().isTensor()) {
+    return -2;
+  }
+  Tensor t = outputs->front().toTensor();
+  if (t.scalar_type() != ScalarType::Float || t.numel() != kFacePixels) {
+    return -3;
+  }
+  const float* p = t.const_data_ptr<float>();
+  for (size_t i = 0; i < kFacePixels; ++i) {
+    float v = p[i] * 255.0f + 0.5f;
+    pixels[i] = static_cast<uint8_t>(v < 0.0f ? 0.0f : (v > 255.0f ? 255.0f : v));
+  }
+  return 0;
+}
 
 extern "C" int app_main(void) {
   executorch::runtime::runtime_init();
@@ -71,17 +108,16 @@ extern "C" int app_main(void) {
       std::make_unique<MemoryAllocator>(kMethodPoolSize, g_method_pool),
       std::make_unique<MemoryAllocator>(kTempPoolSize, g_temp_pool));
 
-  // TinyCNN takes one 16x16 RGB image in NHWC order (see model/model.py),
-  // filled here with a deterministic ramp. The tensor only wraps the buffer;
-  // no tensor extension (and its std::random_device) is needed for that.
-  alignas(16) static float input_data[16 * 16 * 3];
-  for (size_t i = 0; i < sizeof(input_data) / sizeof(input_data[0]); ++i) {
-    input_data[i] = static_cast<float>(i % 32) / 32.0f - 0.5f;
-  }
-  std::array<SizesType, 4> sizes{1, 16, 16, 3};
-  std::array<DimOrderType, 4> dim_order{0, 1, 2, 3};
-  TensorImpl input_impl(ScalarType::Float, sizes.size(), sizes.data(), input_data, dim_order.data());
+  // FaceDecoder takes one latent vector (1x16, see model/model.py) and returns
+  // a 32x32 grey face in [0,1]. Zeros give the "average" face. The tensor only
+  // wraps the buffer; no tensor extension (and its std::random_device) is
+  // needed for that.
+  std::array<SizesType, 2> sizes{1, kLatent};
+  std::array<DimOrderType, 2> dim_order{0, 1};
+  TensorImpl input_impl(ScalarType::Float, sizes.size(), sizes.data(), g_latent, dim_order.data());
   Tensor input(&input_impl);
+  g_module = &module;
+  g_input = &input;
 
   auto outputs = module.forward(input);
   if (!outputs.ok()) {
@@ -99,7 +135,7 @@ extern "C" int app_main(void) {
     printf("Output: %u element(s):", static_cast<unsigned>(t.numel()));
     if (t.scalar_type() == ScalarType::Float) {
       const float* p = t.const_data_ptr<float>();
-      for (size_t i = 0; i < t.numel(); ++i) {
+      for (size_t i = 0; i < t.numel() && i < 10; ++i) {
         printf(" %.4f", p[i]);
       }
     }
@@ -107,6 +143,12 @@ extern "C" int app_main(void) {
   }
 
   printf("Test_result: PASS\n");
+
+  // A board layer can provide face_demo_loop (joystick-driven live faces); it
+  // never returns. Targets without one (the FVP) skip it.
+#ifdef BOARD_FACE_DEMO
+  face_demo_loop();
+#endif
   printf("\x04");  // EOT: ends the FVP run (semihosting exit); a board just sees a 0x04
   fflush(stdout);
   return 0;

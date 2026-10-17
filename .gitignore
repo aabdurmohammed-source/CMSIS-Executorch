@@ -84,3 +84,4 @@ fvp_stdout.log
 !.vscode/fvp.sh
 !.vscode/fvp.Dockerfile
 !.vscode/launch.json.mac
+.gstack/

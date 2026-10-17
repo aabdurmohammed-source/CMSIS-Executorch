@@ -40,7 +40,28 @@ int main(void)
     se_services_port_init();
 
     /* Request the clocks the SE has to enable for this core */
+#ifdef BOARD_FACE_DEMO
+    extern volatile uint32_t g_boot_dbg[4];
+    g_boot_dbg[0] = (uint32_t)board_clocks_config(CLKEN_HFOSC_MASK | CLKEN_CLK_100M_MASK);
+    g_boot_dbg[1] = SERVICES_heartbeat(se_services_s_handle);
+#else
     board_clocks_config(CLKEN_HFOSC_MASK | CLKEN_CLK_100M_MASK);
+#endif
+
+#ifdef BOARD_FACE_DEMO
+    /* The MIPI DPHY (LCD) also needs the 20 MHz clock; request it here, like
+     * the pack's board layer (clock_init), while the SE answers requests. */
+    {
+        extern volatile uint32_t g_clk20m_rc, g_clk20m_err;
+        uint32_t service_error_code = 0U;
+        g_clk20m_rc  = SERVICES_clocks_enable_clock(se_services_s_handle, CLKEN_CLK_20M, true,
+                                                    &service_error_code);
+        g_clk20m_err = service_error_code;
+        /* The PDM microphones need the 76.8 MHz clock on the E8 (Alif demo_pdm.c) */
+        g_boot_dbg[2] = SERVICES_clocks_enable_clock(se_services_s_handle, CLKEN_HFOSCx2, true,
+                                                     &service_error_code);
+    }
+#endif
 
     /* Initialize STDIO (UART4 on the PRG USB connector) */
     stdio_init();
