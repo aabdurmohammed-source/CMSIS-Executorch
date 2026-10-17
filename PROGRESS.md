@@ -108,3 +108,19 @@ Next: pick the project idea and combine components (e.g. camera -> AI, mic -> AI
 - Second NPU CONFIRMED: the same model was exported for the Ethos-U55 (HP, 256 MACs) and ran 100% on the NPU with outputs identical to the U85. 385 µs per face. Details and steps to repeat: tools/u55_test/README.md.
 - One firmware drives one NPU type (the driver is compiled per type). Using the U55 and U85 at the same time would need the M55_HE core.
 - Backup: local branch working-checkpoint (no remote push, per Abdul).
+
+## Bunny companion - Phase 1: NPU fit + timing (Sat Oct 17, evening) - DONE
+Branch `bunny` (from working-checkpoint 432c0e53). Kit + data in model/bunny/ (the 250 MB .npz is git-ignored).
+- model/bunny_decoder.py: BunnyDecoder (30 dials -> Linear 256 -> Linear C0*s*s -> 4x [nearest up x2, conv3x3, ReLU] -> conv3x3 -> 3ch sigmoid). Size and width are settings.
+- model/model.py: input-shape 1x30 = bunny (BUNNY_SIZE / BUNNY_WIDTH env vars, weights model/bunny/bunny_decoder_<size>_w<width>.pt, random if missing); 1x16 = face generator. csolution mlops now 1x30 / BunnyDecoder.
+- src/app_main.cpp reads the input size from the model (as on the camera-mirror branch).
+- Random-weight exports, all 100% NPU (12/12 ops; only the float<->int8 conversion at the edges on the CPU):
+
+| Variant | Weights (MRAM) | Vela SRAM scratch | Board ms/frame (U85, incl. output conversion) |
+|---|---|---|---|
+| 96x96, channels 128-96-64-32 | 1.58 MB | 865 KB | 7.15 ms |
+| 64x64, channels 128-96-64-32 | 0.91 MB | 385 KB | 3.28 ms |
+| 64x64, channels 64-48-32-16 | 0.37 MB | 193 KB | 1.42 ms |
+
+- The NPU is not the bottleneck: even 96x96 is fast enough for 30+ fps. Training time on the laptop CPU is (96 full: ~15 min/epoch; 64 full: ~7.5 min/epoch).
+- Next: Phase 2 training.

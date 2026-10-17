@@ -85,3 +85,7 @@ fvp_stdout.log
 !.vscode/fvp.Dockerfile
 !.vscode/launch.json.mac
 .gstack/
+
+# Bunny training data (250 MB, kept out of git; source: bunny_kit make_dataset.py)
+model/bunny/*.npz
+model/bunny/runs/

@@ -61,9 +61,32 @@ alignas(16) uint8_t g_temp_pool[kTempPoolSize] APP_POOL_ATTRIBUTES;
 constexpr size_t kLatent = 16;
 constexpr size_t kFacePixels = 32 * 32;
 
-alignas(16) float g_latent[kLatent];  // the decoder's input buffer
+constexpr size_t kMaxInput = 32 * 32;
+
+// The model's input buffer: a 16-value latent (FaceDecoder) or a normalized
+// 32x32 grey crop (FaceMirror); the model's metadata says which (g_in_numel).
+alignas(16) float g_latent[kMaxInput];
+size_t g_in_numel = 0;
 EmbeddedModule* g_module = nullptr;
 Tensor* g_input = nullptr;
+
+// Runs the model on g_latent and writes its 32x32 output as 8-bit pixels.
+int run_to_pixels(uint8_t* pixels) {
+  auto outputs = g_module->forward(*g_input);
+  if (!outputs.ok() || outputs->empty() || !outputs->front().isTensor()) {
+    return -2;
+  }
+  Tensor t = outputs->front().toTensor();
+  if (t.scalar_type() != ScalarType::Float || t.numel() != kFacePixels) {
+    return -3;
+  }
+  const float* p = t.const_data_ptr<float>();
+  for (size_t i = 0; i < kFacePixels; ++i) {
+    float v = p[i] * 255.0f + 0.5f;
+    pixels[i] = static_cast<uint8_t>(v < 0.0f ? 0.0f : (v > 255.0f ? 255.0f : v));
+  }
+  return 0;
+}
 
 }  // namespace
 
@@ -85,29 +108,39 @@ volatile float g_test_out[10];
 #endif
 #endif
 
-// Runs the decoder on the NPU: 16 latent values in, 32x32 8-bit pixels out.
+// Which model the AI layer holds, from its input size.
+const char* model_name() {
+  return g_in_numel == kLatent ? "FaceDecoder" : (g_in_numel == 30 ? "BunnyDecoder" : "FaceMirror");
+}
+
+// Number of input values the embedded model takes: 16 (FaceDecoder, latent
+// in) or 1024 (FaceMirror, 32x32 crop in). 0 before app_main has loaded it.
+extern "C" int face_model_input_size(void) {
+  return static_cast<int>(g_in_numel);
+}
+
+// FaceDecoder on the NPU: 16 latent values in, 32x32 8-bit pixels out.
 // Returns 0 on success.
 extern "C" int face_generate(const float* latent, uint8_t* pixels) {
-  if (g_module == nullptr || g_input == nullptr) {
+  if (g_module == nullptr || g_input == nullptr || g_in_numel != kLatent) {
     return -1;
   }
   for (size_t i = 0; i < kLatent; ++i) {
     g_latent[i] = latent[i];
   }
-  auto outputs = g_module->forward(*g_input);
-  if (!outputs.ok() || outputs->empty() || !outputs->front().isTensor()) {
-    return -2;
+  return run_to_pixels(pixels);
+}
+
+// FaceMirror on the NPU: a normalized 32x32 grey crop (values 0..1, row
+// major) in, a generated 32x32 face as 8-bit pixels out. Returns 0 on success.
+extern "C" int face_mirror(const float* crop, uint8_t* pixels) {
+  if (g_module == nullptr || g_input == nullptr || g_in_numel != kFacePixels) {
+    return -1;
   }
-  Tensor t = outputs->front().toTensor();
-  if (t.scalar_type() != ScalarType::Float || t.numel() != kFacePixels) {
-    return -3;
-  }
-  const float* p = t.const_data_ptr<float>();
   for (size_t i = 0; i < kFacePixels; ++i) {
-    float v = p[i] * 255.0f + 0.5f;
-    pixels[i] = static_cast<uint8_t>(v < 0.0f ? 0.0f : (v > 255.0f ? 255.0f : v));
+    g_latent[i] = crop[i];
   }
-  return 0;
+  return run_to_pixels(pixels);
 }
 
 extern "C" int app_main(void) {
@@ -121,13 +154,36 @@ extern "C" int app_main(void) {
       std::make_unique<MemoryAllocator>(kMethodPoolSize, g_method_pool),
       std::make_unique<MemoryAllocator>(kTempPoolSize, g_temp_pool));
 
-  // FaceDecoder takes one latent vector (1x16, see model/model.py) and returns
-  // a 32x32 grey face in [0,1]. Zeros give the "average" face. The tensor only
-  // wraps the buffer; no tensor extension (and its std::random_device) is
-  // needed for that.
-  std::array<SizesType, 2> sizes{1, kLatent};
-  std::array<DimOrderType, 2> dim_order{0, 1};
-  TensorImpl input_impl(ScalarType::Float, sizes.size(), sizes.data(), g_latent, dim_order.data());
+  // The input shape comes from the model (model/model.py): 1x16 for the
+  // FaceDecoder, 1x1x32x32 for the FaceMirror. Both return a 32x32 grey face
+  // in [0,1]; an all-zero input is the test input. The tensor only wraps the
+  // buffer; no tensor extension (and its std::random_device) is needed for that.
+  std::array<SizesType, 4> sizes{1, static_cast<SizesType>(kLatent), 1, 1};
+  size_t rank = 2;
+  {
+    auto meta = module.method_meta("forward");
+    if (meta.ok()) {
+      auto in_meta = meta->input_tensor_meta(0);
+      if (in_meta.ok() && in_meta->sizes().size() <= sizes.size()) {
+        rank = in_meta->sizes().size();
+        for (size_t d = 0; d < rank; ++d) {
+          sizes[d] = in_meta->sizes()[d];
+        }
+      }
+    }
+  }
+  g_in_numel = 1;
+  for (size_t d = 0; d < rank; ++d) {
+    g_in_numel *= static_cast<size_t>(sizes[d]);
+  }
+  if (g_in_numel > kMaxInput) {
+    printf("model input of %u values does not fit the input buffer\n", static_cast<unsigned>(g_in_numel));
+    return 1;
+  }
+  printf("model input: %u values (%s)\n", static_cast<unsigned>(g_in_numel),
+         model_name());
+  std::array<DimOrderType, 4> dim_order{0, 1, 2, 3};
+  TensorImpl input_impl(ScalarType::Float, rank, sizes.data(), g_latent, dim_order.data());
   Tensor input(&input_impl);
   g_module = &module;
   g_input = &input;
@@ -187,7 +243,8 @@ extern "C" int app_main(void) {
     g_bench_us[0] = static_cast<uint32_t>(total / kRuns / mhz);
     g_bench_us[1] = lo / mhz;
     g_bench_us[2] = hi / mhz;
-    printf("bench: FaceDecoder on " NPU_NAME ": avg %lu us, min %lu us, max %lu us per face (%d runs, CPU %lu MHz)\n",
+    printf("bench: %s on " NPU_NAME ": avg %lu us, min %lu us, max %lu us per face (%d runs, CPU %lu MHz)\n",
+           model_name(),
            (unsigned long)g_bench_us[0], (unsigned long)g_bench_us[1], (unsigned long)g_bench_us[2],
            kRuns, (unsigned long)mhz);
   }

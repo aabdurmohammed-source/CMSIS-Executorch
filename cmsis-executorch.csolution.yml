@@ -118,7 +118,7 @@ solution:
   # keys under model: are passed through to create_ai_layer.py.
   # https://open-cmsis-pack.github.io/cmsis-toolbox/build-overview/#mlops-information
   mlops:
-    description: Face generator (int8) for Ethos-U85
+    description: Bunny decoder (int8, 30 pose dials in, RGB bunny out) for Ethos-U85
     npu:
       type: Ethos-U85 # explicit: the Ensemble pack lists an Ethos-U55 first
     vela:
@@ -130,8 +130,8 @@ solution:
       memory: Shared_Sram
     model:
       clayer: $AI-Layer$
-      name: FaceDecoder
+      name: BunnyDecoder
       # Model parameters for create_ai_layer.py: the NHWC input shape and the
       # number of samples the quantizer is calibrated with.
-      input-shape: 1x16
+      input-shape: 1x30
       calibration-samples: 64
