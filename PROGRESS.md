@@ -102,3 +102,9 @@ Next: pick the project idea and combine components (e.g. camera -> AI, mic -> AI
 - BMI323 IMU on I3C (board/DevKit-E8/imu.c) comes up at the default I/O voltage (no 1.8V switch needed).
 - Board tilted/tapped -> LEDs green (IMU motion > 25). Hand waved at camera -> LEDs blue (frame-difference > 12% of grid). Touch -> white.
 - Confirmed by Abdul on hardware.
+
+## Performance + second NPU (Sat Oct 17, afternoon)
+- FaceDecoder on Ethos-U85: 249 µs per face (avg of 100 runs, 248-255 µs, CPU at 400 MHz). Printed at boot as `bench: ...`. Debug global g_bench_us[3].
+- Second NPU CONFIRMED: the same model was exported for the Ethos-U55 (HP, 256 MACs) and ran 100% on the NPU with outputs identical to the U85. 385 µs per face. Details and steps to repeat: tools/u55_test/README.md.
+- One firmware drives one NPU type (the driver is compiled per type). Using the U55 and U85 at the same time would need the M55_HE core.
+- Backup: local branch working-checkpoint (no remote push, per Abdul).

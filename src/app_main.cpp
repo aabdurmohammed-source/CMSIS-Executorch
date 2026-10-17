@@ -69,7 +69,20 @@ Tensor* g_input = nullptr;
 
 // Provided by the board layer when it defines BOARD_FACE_DEMO.
 #ifdef BOARD_FACE_DEMO
+#include "RTE_Components.h"
+#include CMSIS_device_header
 extern "C" void face_demo_loop(void);
+// Decoder benchmark results in microseconds (debugger-readable).
+extern "C" volatile uint32_t g_bench_us[3];  // avg, min, max
+volatile uint32_t g_bench_us[3];
+// First 10 outputs of the zero-latent test run (debugger-readable, to compare NPUs).
+extern "C" volatile float g_test_out[10];
+volatile float g_test_out[10];
+#if defined(ETHOSU85)
+#define NPU_NAME "Ethos-U85"
+#else
+#define NPU_NAME "Ethos-U55"
+#endif
 #endif
 
 // Runs the decoder on the NPU: 16 latent values in, 32x32 8-bit pixels out.
@@ -137,6 +150,9 @@ extern "C" int app_main(void) {
       const float* p = t.const_data_ptr<float>();
       for (size_t i = 0; i < t.numel() && i < 10; ++i) {
         printf(" %.4f", p[i]);
+#ifdef BOARD_FACE_DEMO
+        g_test_out[i] = p[i];
+#endif
       }
     }
     printf("\n");
@@ -147,6 +163,34 @@ extern "C" int app_main(void) {
   // A board layer can provide face_demo_loop (joystick-driven live faces); it
   // never returns. Targets without one (the FVP) skip it.
 #ifdef BOARD_FACE_DEMO
+  // Time the decoder by itself: 100 forward() calls on the Ethos-U85.
+  {
+    constexpr int kRuns = 100;
+    DCB->DEMCR |= DCB_DEMCR_TRCENA_Msk;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    uint64_t total = 0;
+    uint32_t lo = 0xFFFFFFFFu, hi = 0;
+    for (int i = 0; i < kRuns; ++i) {
+      g_latent[i % kLatent] = 0.01f * static_cast<float>(i);
+      uint32_t c0 = DWT->CYCCNT;
+      auto r = module.forward(input);
+      uint32_t c = DWT->CYCCNT - c0;
+      if (!r.ok()) {
+        printf("bench: forward failed at run %d\n", i);
+        break;
+      }
+      total += c;
+      lo = c < lo ? c : lo;
+      hi = c > hi ? c : hi;
+    }
+    uint32_t mhz = SystemCoreClock / 1000000u;
+    g_bench_us[0] = static_cast<uint32_t>(total / kRuns / mhz);
+    g_bench_us[1] = lo / mhz;
+    g_bench_us[2] = hi / mhz;
+    printf("bench: FaceDecoder on " NPU_NAME ": avg %lu us, min %lu us, max %lu us per face (%d runs, CPU %lu MHz)\n",
+           (unsigned long)g_bench_us[0], (unsigned long)g_bench_us[1], (unsigned long)g_bench_us[2],
+           kRuns, (unsigned long)mhz);
+  }
   face_demo_loop();
 #endif
   printf("\x04");  // EOT: ends the FVP run (semihosting exit); a board just sees a 0x04
