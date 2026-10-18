@@ -130,8 +130,8 @@ solution:
       memory: Shared_Sram
     model:
       clayer: $AI-Layer$
-      name: BunnyDecoder
+      name: BunnyDecoderV2
       # Model parameters for create_ai_layer.py: the NHWC input shape and the
       # number of samples the quantizer is calibrated with.
-      input-shape: 1x30
+      input-shape: 1x32
       calibration-samples: 64

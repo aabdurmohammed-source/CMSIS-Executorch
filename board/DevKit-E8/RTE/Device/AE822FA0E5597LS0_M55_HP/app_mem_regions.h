@@ -38,7 +38,7 @@
 // <h> MRAM User Region
 //   <o> User Base address <0x80000000-0x8057FFFF:8>
 //   <i> Defines base address of MRAM user region
-#define APP_MRAM_USER_BASE   0x80400000
+#define APP_MRAM_USER_BASE   0x80400000   /* keep: a model placed above 0x80400000 made the NPU fail (128x128 test), so the app must fit in 2 MB */
 
 //   <o> User Region size [bytes] <0x0-0x00580000:8>
 //   <i> Defines size of MRAM user region

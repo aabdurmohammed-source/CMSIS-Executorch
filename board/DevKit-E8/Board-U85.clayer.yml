@@ -49,7 +49,7 @@ layer:
     # section there.
     - APP_POOL_SECTION: \".bss.ai_pool\"
     - APP_METHOD_POOL_SIZE: 0x100000
-    - APP_TEMP_POOL_SIZE: 0x200000
+    - APP_TEMP_POOL_SIZE: 0x200000  # v2 96x96 decoder needs ~1.7 MB of Vela scratch
 
   packs:
     - pack: AlifSemiconductor::Ensemble@^2.2.0-0

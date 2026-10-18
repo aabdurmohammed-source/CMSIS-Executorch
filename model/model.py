@@ -28,6 +28,11 @@ def _is_bunny(input_shape: tuple[int, ...]) -> bool:
     return tuple(input_shape) == (1, 30)
 
 
+def _is_bunny_v2(input_shape: tuple[int, ...]) -> bool:
+    """1x32: the cloud-trained DecoderV2 (model/bunny/decoder_v2_<BUNNY_SIZE>.pt)."""
+    return tuple(input_shape) == (1, 32)
+
+
 def bunny_config() -> tuple[int, float, Path]:
     size = int(os.environ.get("BUNNY_SIZE", "64"))
     width = float(os.environ.get("BUNNY_WIDTH", "0.5"))
@@ -35,6 +40,13 @@ def bunny_config() -> tuple[int, float, Path]:
 
 
 def get_model(input_shape: tuple[int, ...] = INPUT_SHAPE) -> torch.nn.Module:
+    if _is_bunny_v2(input_shape):
+        from bunny_decoder_v2 import load_v2
+
+        size = int(os.environ.get("BUNNY_SIZE", "128"))
+        path = HERE / "bunny" / f"decoder_v2_{size}.pt"
+        print(f"[model] DecoderV2 {size}x{size}: {path.name}")
+        return load_v2(path, size).prepare_for_int8().eval()
     if _is_bunny(input_shape):
         from bunny_decoder import BunnyDecoder
 
@@ -56,6 +68,33 @@ def get_calibration_inputs(
     input_shape: tuple[int, ...] = INPUT_SHAPE, calibration_samples: int = 2
 ) -> list[torch.Tensor]:
     gen = torch.Generator().manual_seed(0)
+    if _is_bunny_v2(input_shape):
+        # Real dial vectors from the clips, normalised with dial_ranges_v2.json
+        import json
+        import sys
+
+        import numpy as np
+
+        import types
+
+        sys.modules.setdefault("cairosvg", types.ModuleType("cairosvg"))  # rendering only; not needed here
+        sys.path.insert(0, str(HERE / "bunny" / "kit_v2"))
+        rng = json.loads((HERE / "bunny" / "dial_ranges_v2.json").read_text())
+        lo, hi = np.array(rng["lo"], np.float32), np.array(rng["hi"], np.float32)
+        from clips import CLIPS, DURATION, clip  # kit_v2 motion clips (no cairosvg needed)
+        from bunny_rig3 import to_vec
+
+        names = list(CLIPS)
+        r = np.random.default_rng(0)
+        out = []
+        for i in range(calibration_samples):
+            name = names[i % len(names)]
+            d, _, _, _ = clip(name, float(r.uniform(0, DURATION.get(name, 2.4))), float(r.uniform(0.8, 1.1)))
+            for k, (a, b) in (("hue", (-0.07, 0.07)), ("sat", (0.8, 1.15)), ("ear_len", (108, 148)), ("head_scale", (0.92, 1.08))):
+                d[k] = float(r.uniform(a, b))
+            v = (to_vec(d) - lo) / (hi - lo)
+            out.append(torch.from_numpy(np.clip(v, 0, 1)).float().unsqueeze(0))
+        return out
     if _is_bunny(input_shape):
         # Real training dial vectors (normalised), like the board will feed in
         import numpy as np

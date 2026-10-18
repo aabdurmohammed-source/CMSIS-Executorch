@@ -11,19 +11,26 @@
 #define PI  3.14159265f
 #define TAU 6.28318531f
 
-/* (default, lo, hi) of the 19 scalar dials, in NN order (bunny_rig3.SCALARS) */
-static const float scalars[19][3] = {
+/* (default, lo, hi) of the 21 scalar dials, in NN order (kit_v2 bunny_rig3.SCALARS) */
+static const float scalars[21][3] = {
     {-12, -75, 15}, {12, -15, 75}, {0, -10, 90}, {128, 108, 148},
     {0, -7, 7}, {0, -6, 6},
     {0, -30, 160}, {0, -160, 30}, {0, -20, 6}, {0, -20, 6},
     {1.0f, 0.82f, 1.14f}, {0, -14, 14}, {0, 0, 1}, {0, -16, 16},
     {0.85f, 0.4f, 1.0f}, {0, 0, 1},
     {0, -0.07f, 0.07f}, {1.0f, 0.8f, 1.15f}, {1.0f, 0.92f, 1.08f},
+    {0, 0, 1}, {0, 0, 1},  /* brow, dizzy */
 };
+
+/* NN input normalisation: lo/hi of each dial from model/bunny/dial_ranges_v2.json
+ * (what the v2 decoder was trained with) */
+static const float norm_lo[BUNNY_NDIAL] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, -75.0f, -15.0f, -10.0f, 108.0007f, -7.0f, -6.0f, -30.0f, -160.0f, -20.0f, -20.0f, 0.82f, -14.0f, 0.0f, -16.0f, 0.4f, 0.0f, -0.06999239f, 0.8000113f, 0.9200003f, 0.0f, 0.0f};
+static const float norm_hi[BUNNY_NDIAL] = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 15.0f, 75.0f, 90.0f, 147.9995f, 7.0f, 6.0f, 160.0f, 30.0f, 6.0f, 6.0f, 1.14f, 14.0f, 1.0f, 16.0f, 1.0f, 1.0f, 0.06999976f, 1.149991f, 1.08f, 1.0f, 1.0f};
+
 
 static const char *const names[CLIP_COUNT] = {
     "idle", "look", "hop", "walk", "run", "wave", "shake", "lie_down", "sleep",
-    "sit", "yawn", "sad", "eat", "love", "stretch", "clap",
+    "sit", "yawn", "sad", "eat", "love", "stretch", "clap", "angry", "dizzy", "confused",
 };
 
 static float lerpf(float a, float b, float t) { return a + (b - a) * t; }
@@ -47,7 +54,7 @@ static float modf_pos(float t, float m)
 static void P(bunny_pose_t *o, int eye, int mouth)
 {
     memset(o, 0, sizeof(*o));
-    for (int i = 0; i < 19; ++i) {
+    for (int i = 0; i < 21; ++i) {
         o->d[11 + i] = scalars[i][0];
     }
     o->d[eye] = 1.0f;
@@ -283,6 +290,58 @@ static void clap(float t, float a, bunny_pose_t *o)
     o->d[D_EAR_R] = 14.0f;
 }
 
+static void angry(float t, float a, bunny_pose_t *o)
+{
+    (void)a;
+    float u = smooth(t / 0.35f), ph = TAU * 6.0f * t;
+    P(o, D_EYE_OPEN, D_MOUTH_FROWN);
+    o->d[D_BROW] = u;
+    o->d[D_EYE_OPEN] = 1.0f - 0.35f * u;
+    o->d[D_EYE_SAD] = 0.35f * u;
+    o->d[D_EAR_L] = lerpf(-12.0f, -46.0f, u);
+    o->d[D_EAR_R] = lerpf(12.0f, 46.0f, u);
+    o->d[D_CURL] = lerpf(0.0f, 55.0f, u);
+    o->d[D_SQUASH] = lerpf(1.0f, 1.04f, u) + 0.01f * sinf(ph);
+    o->d[D_BLUSH] = lerpf(0.85f, 0.45f, u);
+    o->d[D_TILT] = 1.2f * sinf(ph) * u;
+    o->d[D_ARM_L] = lerpf(0.0f, 22.0f, u);
+    o->d[D_ARM_R] = -lerpf(0.0f, 22.0f, u);
+    o->dx = 2.0f * sinf(ph) * u;
+}
+
+static void dizzy(float t, float a, bunny_pose_t *o)
+{
+    (void)a;
+    float ph = TAU * t / 1.1f;
+    P(o, D_EYE_OPEN, D_MOUTH_O);
+    o->d[D_DIZZY] = 1.0f;
+    o->d[D_MOUTH_O] = 0.5f + 0.2f * sinf(2.0f * ph);
+    o->d[D_MOUTH_FLAT] = 0.5f - 0.2f * sinf(2.0f * ph);
+    o->d[D_TILT] = 8.0f * sinf(ph);
+    o->d[D_HEAD_TILT] = 8.0f * sinf(ph + 1.0f);
+    o->d[D_EAR_L] = -20.0f + 10.0f * sinf(ph);
+    o->d[D_EAR_R] = 20.0f + 10.0f * sinf(ph + 2.0f);
+    o->d[D_CURL] = 30.0f;
+    o->d[D_SQUASH] = 1.0f + 0.02f * sinf(2.0f * ph);
+    o->d[D_ARM_L] = 18.0f;
+    o->d[D_ARM_R] = -18.0f;
+    o->dx = 8.0f * sinf(ph);
+}
+
+static void confused(float t, float a, bunny_pose_t *o)
+{
+    (void)a;
+    float u = smooth(t / 0.5f);
+    P(o, D_EYE_OPEN, D_MOUTH_FLAT);
+    o->d[D_HEAD_TILT] = lerpf(0.0f, 13.0f, u) + 2.0f * sinf(TAU * t / 1.8f);
+    o->d[D_LOOK_Y] = -4.0f * u;
+    o->d[D_LOOK_X] = 3.0f * sinf(TAU * t / 2.2f);
+    o->d[D_EAR_L] = lerpf(-12.0f, -22.0f, u);
+    o->d[D_EAR_R] = lerpf(12.0f, 4.0f, u);
+    o->d[D_CURL] = lerpf(0.0f, 25.0f, u);
+    o->d[D_SQUASH] = 1.0f + 0.01f * sinf(TAU * t / 2.4f);
+}
+
 void bunny_clip(bunny_clip_t clip, float t, float a, bunny_pose_t *o)
 {
     switch (clip) {
@@ -301,6 +360,9 @@ void bunny_clip(bunny_clip_t clip, float t, float a, bunny_pose_t *o)
     case CLIP_LOVE:     love(t, a, o); break;
     case CLIP_STRETCH:  stretch(t, a, o); break;
     case CLIP_CLAP:     clap(t, a, o); break;
+    case CLIP_ANGRY:    angry(t, a, o); break;
+    case CLIP_DIZZY:    dizzy(t, a, o); break;
+    case CLIP_CONFUSED: confused(t, a, o); break;
     case CLIP_IDLE:
     default:            idle(t, a, o); break;
     }
@@ -337,9 +399,7 @@ void bunny_dial_range(int i, float *lo, float *hi)
 void bunny_normalize(const float *raw, float *nn_in)
 {
     for (int i = 0; i < BUNNY_NDIAL; ++i) {
-        float lo, hi;
-        bunny_dial_range(i, &lo, &hi);
-        float v = (raw[i] - lo) / (hi - lo);
+        float v = (raw[i] - norm_lo[i]) / (norm_hi[i] - norm_lo[i]);
         nn_in[i] = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
     }
 }

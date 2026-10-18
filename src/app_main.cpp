@@ -113,7 +113,7 @@ volatile float g_test_out[10];
 
 // Which model the AI layer holds, from its input size.
 const char* model_name() {
-  return g_in_numel == kLatent ? "FaceDecoder" : (g_in_numel == 30 ? "BunnyDecoder" : "FaceMirror");
+  return g_in_numel == kLatent ? "FaceDecoder" : (g_in_numel == 30 ? "BunnyDecoder" : (g_in_numel == 32 ? "BunnyDecoderV2" : "FaceMirror"));
 }
 
 // Number of input values the embedded model takes: 16 (FaceDecoder, latent

@@ -23,7 +23,7 @@ layer:
     - component: Machine Learning:ExecuTorch Operators:Quantized quantize
 
   groups:
-    - group: BunnyDecoder
+    - group: BunnyDecoderV2
       files:
         - file: ./model_pte.c
         - file: ./model_pte.h

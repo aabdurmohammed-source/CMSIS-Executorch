@@ -353,7 +353,7 @@ __attribute__((naked)) void HardFault_Handler(void)
 
 /* ---- sprite: NN output -> screen --------------------------------------- */
 
-#define MAX_NN  96
+#define MAX_NN  128
 #define MAX_SPR 480
 
 static uint8_t  src_rgb[MAX_NN * MAX_NN * 3];
@@ -599,7 +599,7 @@ extern int doodle_classify(const float *in, float *scores, int n);
 
 static const char *const doodle_names[8] = {"STAR", "SUN", "HOUSE", "CAT", "FLOWER", "FISH", "SMILEY FACE", "LIGHTNING"};
 /* how the bunny reacts to each class (same order) */
-static const bunny_clip_t doodle_react[8] = {CLIP_CLAP, CLIP_STRETCH, CLIP_HOP, CLIP_SHAKE, CLIP_LOVE, CLIP_EAT, CLIP_WAVE, CLIP_SHAKE};
+static const bunny_clip_t doodle_react[8] = {CLIP_CLAP, CLIP_STRETCH, CLIP_HOP, CLIP_SHAKE, CLIP_LOVE, CLIP_EAT, CLIP_WAVE, CLIP_ANGRY};
 
 static int16_t ink_x[INK_MAX], ink_y[INK_MAX];
 static int ink_n;
@@ -846,7 +846,7 @@ void bunny_demo_loop(void)
         printf("bunny: unexpected output size %d\n", n_out);
         for (;;) {}
     }
-    int spr_home = (SPRITE_PX / nn_side) * nn_side;
+    int spr_home = SPRITE_PX;  /* bilinear scaling handles any ratio */
     if (spr_home > MAX_SPR) spr_home = MAX_SPR;
     spr = spr_home;
     build_tables();
@@ -1045,7 +1045,7 @@ void bunny_demo_loop(void)
         if (st == ST_LIE || st == ST_SLEEP) {
             if (any_input) {  /* bolt awake */
                 st = ST_ACTION;
-                set_clip(motion > IMU_SHAKE_TH ? CLIP_SHAKE : CLIP_STRETCH);
+                set_clip(motion > IMU_SHAKE_TH ? CLIP_DIZZY : CLIP_STRETCH);
                 action_len = bunny_clip_duration(clip);
                 state_t_s = 0.0f;
             } else if (st == ST_LIE && state_t_s > bunny_clip_duration(CLIP_LIE_DOWN)) {
@@ -1055,7 +1055,7 @@ void bunny_demo_loop(void)
             }
         } else {
             bunny_clip_t act = CLIP_COUNT;
-            if (motion > IMU_SHAKE_TH) act = CLIP_SHAKE;
+            if (motion > IMU_SHAKE_TH) act = CLIP_DIZZY;
             else if (newly & 1u) act = CLIP_WAVE;
             else if (newly & 2u) act = CLIP_YAWN;
             else if (newly & 4u) act = CLIP_HOP;
@@ -1185,7 +1185,7 @@ void bunny_demo_loop(void)
                 for (int i = 0; i < 8; ++i) sum += expf(sc8[i] - mx);
                 float pbest = 1.0f / sum;
                 printf("doodle: %s %d%% (%lu us)\n", doodle_names[best], (int)(pbest * 100.0f), (unsigned long)dus);
-                bunny_clip_t react = pbest >= DOODLE_MIN_P ? doodle_react[best] : CLIP_SAD;
+                bunny_clip_t react = pbest >= DOODLE_MIN_P ? doodle_react[best] : CLIP_CONFUSED;
                 if (pbest >= DOODLE_MIN_P) {
                     snprintf(bubble_text, sizeof(bubble_text), "%s!", doodle_names[best]);
                 } else {
@@ -1304,7 +1304,8 @@ void bunny_demo_loop(void)
 
         /* LEDs follow the mood */
         if (clip == CLIP_LOVE) leds_rgb(1, 0, 1);
-        else if (clip == CLIP_SHAKE) leds_rgb(1, 1, 0);
+        else if (clip == CLIP_SHAKE || clip == CLIP_DIZZY) leds_rgb(1, 1, 0);
+        else if (clip == CLIP_ANGRY) leds_rgb(1, 0, 0);
         else if (clip == CLIP_HOP || clip == CLIP_CLAP) leds_rgb(0, 1, 0);
         else if (perk > 0.0f) leds_rgb(0, 0, 1);
         else leds_rgb(0, ((now / (SystemCoreClock / 2U)) & 3U) == 0U, 0);  /* slow green heartbeat */
