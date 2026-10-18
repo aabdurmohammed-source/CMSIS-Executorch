@@ -38,7 +38,7 @@
 // <h> MRAM User Region
 //   <o> User Base address <0x80000000-0x8057FFFF:8>
 //   <i> Defines base address of MRAM user region
-#define APP_MRAM_USER_BASE   0x80560000   /* TEST: room for the 128x128 model */
+#define APP_MRAM_USER_BASE   0x80560000   /* moved up: room for the 2.6 MB 128x128 model (NPU runs it from an SRAM copy); SE TOC/stubs sit from 0x8057C890 */
 
 //   <o> User Region size [bytes] <0x0-0x00580000:8>
 //   <i> Defines size of MRAM user region
