@@ -28,6 +28,14 @@
 
 #include "se_services_port.h"
 
+#ifdef BOARD_BUNNY_DEMO
+/* Boot progress on the RGB LEDs (bunny_demo.c), visible without a debugger */
+extern void bunny_boot_led(int r, int g, int b);
+#define BOOT_LED(r, g, b) bunny_boot_led(r, g, b)
+#else
+#define BOOT_LED(r, g, b)
+#endif
+
 int main(void)
 {
     /* Apply the Conductor pin configuration (includes the UART4 console pins) */
@@ -35,6 +43,8 @@ int main(void)
 
     /* Apply the Conductor GPIO configuration */
     board_gpios_config();
+
+    BOOT_LED(1, 0, 0);  /* red: started */
 
     /* Bring up the Secure Enclave services (MHU link to the SE) */
     se_services_port_init();
@@ -62,6 +72,8 @@ int main(void)
                                                      &service_error_code);
     }
 #endif
+
+    BOOT_LED(1, 1, 0);  /* yellow: clocks requested */
 
     /* Initialize STDIO (UART4 on the PRG USB connector) */
     stdio_init();

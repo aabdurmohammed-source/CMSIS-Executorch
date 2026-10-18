@@ -22,5 +22,10 @@ ls -la "$SET/build/images/fw_app.bin"
 cd "$SET"
 sed 's/"M55_HP_mram_stub.bin"/"fw_app.bin"/' build/config/M55_HP_mram_cfg.json > build/config/fw_mram_cfg.json
 ./app-gen-toc.exe -f build/config/fw_mram_cfg.json | tr '\r' '\n' | grep -E "Binary File|Done|rror"
-yes y | ./app-write-mram.exe -p -c "$COM" | tr '\r' '\n' | grep -E "Done|seconds|rror" | tail -4
+OUT=$(yes y | ./app-write-mram.exe -p -c "$COM" 2>&1 | tr '\r' '\n')
+if echo "$OUT" | grep -q "Target did not respond"; then
+    echo "FAILED: the Secure Enclave did not respond. Keep SW4 on SE, press RESET, run again."
+    exit 1
+fi
+echo "$OUT" | grep -E "Done|seconds" | tail -4
 echo "Flashed. Move SW4 to U4 and replug the USB."

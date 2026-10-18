@@ -35,6 +35,7 @@
 #include "mic.h"
 #include "imu.h"
 #include "bunny_clips.h"
+#include "se_services_port.h"
 
 extern int nn_forward(const float *in, int n_in, const float **out, int *n_out);
 
@@ -50,11 +51,24 @@ extern int nn_forward(const float *in, int n_in, const float **out, int *n_out);
 #define IMU_WAKE_TH     25.0f   /* IMU motion that wakes him (still ~1-12)    */
 #define IMU_SHAKE_TH    150.0f  /* IMU motion that counts as a shake          */
 #define LOUD_DB         30.0f   /* mic level (dB of RMS) that makes ears perk */
-#define SPRITE_PX       240     /* sprite size on screen (about)              */
-#define GROUND_Y        640     /* sprite bottom on screen                    */
+#define SPRITE_PX       448     /* sprite size on screen (64 -> 448, 48 -> 432) */
+#define EDGE_FRAC       0.22f   /* how far the (mostly empty) sprite square may leave the screen */
+#define RELEASE_S       0.15f   /* no finger this long = lifted (GT911 sends gaps) */
+#define COLD_START_MS   1000    /* let the panel power up before the display init */
+#define GROUND_Y        690     /* sprite bottom on screen                    */
 #define GRAPH_Y0        700     /* mic graph strip                            */
 
 volatile uint32_t g_bunny_nn_us, g_bunny_fps;  /* debugger-readable */
+
+#define SLOW_FRAME_MS   150     /* a frame slower than this prints its stage times */
+#define IMU_EVERY       3       /* read the IMU every Nth frame                     */
+#define IMU_SLOW_US     5000    /* an IMU read slower than this counts as a failure */
+#define SENSOR_FAILS    3       /* consecutive failures before backing off          */
+
+static inline uint32_t us_since(uint32_t c0)
+{
+    return (DWT->CYCCNT - c0) / (SystemCoreClock / 1000000u);
+}
 
 /* ---- small helpers ----------------------------------------------------- */
 
@@ -225,14 +239,50 @@ static const uint8_t joy_pin[5] = {
     BOARD_JOY_SW_D_GPIO_PIN, BOARD_JOY_SW_CENTER_GPIO_PIN,
 };
 
-static void io_init(void)
+static int led_last = -1;
+
+static void leds_init_once(void)
 {
+    static int done;
+    if (done) return;
+    done = 1;
     for (int i = 0; i < 6; ++i) {
         led_drv[i]->Initialize(led_pin_no[i], NULL);
         led_drv[i]->PowerControl(led_pin_no[i], ARM_POWER_FULL);
         led_drv[i]->SetDirection(led_pin_no[i], GPIO_PIN_DIRECTION_OUTPUT);
         led_drv[i]->SetValue(led_pin_no[i], GPIO_PIN_OUTPUT_STATE_LOW);
     }
+}
+
+static void leds_rgb(int r, int g, int b)
+{
+    int want = (r ? 4 : 0) | (g ? 2 : 0) | (b ? 1 : 0);
+    if (want == led_last) return;
+    led_last = want;
+    const int on[6] = {r, g, b, r, g, b};
+    for (int i = 0; i < 6; ++i) {
+        led_drv[i]->SetValue(led_pin_no[i], on[i] ? GPIO_PIN_OUTPUT_STATE_HIGH : GPIO_PIN_OUTPUT_STATE_LOW);
+    }
+}
+
+/* Boot progress (called from main.c too): red = started, yellow = clocks,
+ * blue = model loaded / display starting, green = running, blinking red =
+ * display failed. */
+void bunny_boot_led(int r, int g, int b)
+{
+    leds_init_once();
+    leds_rgb(r, g, b);
+}
+
+static void busy_ms(uint32_t ms)
+{
+    uint32_t t0 = DWT->CYCCNT, n = (SystemCoreClock / 1000U) * ms;
+    while (DWT->CYCCNT - t0 < n) {}
+}
+
+static void io_init(void)
+{
+    leds_init_once();
     for (int j = 0; j < 5; ++j) {
         ARM_Driver_GPIO_(15).Initialize(joy_pin[j], NULL);
         ARM_Driver_GPIO_(15).PowerControl(joy_pin[j], ARM_POWER_FULL);
@@ -240,22 +290,38 @@ static void io_init(void)
     }
 }
 
-static void leds_rgb(int r, int g, int b)
+/* ---- crash reporter ---------------------------------------------------- */
+
+/* A fault prints where it happened (UART) and blinks the LEDs purple instead
+ * of freezing silently. The stacked PC/LR map to source lines with addr2line. */
+void bunny_fault_report(uint32_t *sp, uint32_t exc_return)
 {
-    static int last = -1;
-    int want = (r ? 4 : 0) | (g ? 2 : 0) | (b ? 1 : 0);
-    if (want == last) return;
-    last = want;
-    const int on[6] = {r, g, b, r, g, b};
-    for (int i = 0; i < 6; ++i) {
-        led_drv[i]->SetValue(led_pin_no[i], on[i] ? GPIO_PIN_OUTPUT_STATE_HIGH : GPIO_PIN_OUTPUT_STATE_LOW);
+    printf("FAULT pc=%08lx lr=%08lx cfsr=%08lx hfsr=%08lx bfar=%08lx mmfar=%08lx exc=%08lx\n",
+           (unsigned long)sp[6], (unsigned long)sp[5], (unsigned long)SCB->CFSR, (unsigned long)SCB->HFSR,
+           (unsigned long)SCB->BFAR, (unsigned long)SCB->MMFAR, (unsigned long)exc_return);
+    for (;;) {
+        for (volatile uint32_t i = 0; i < 8000000u; ++i) {}
+        for (int k = 0; k < 6; ++k) led_drv[k]->SetValue(led_pin_no[k], (k % 3 != 1) ? GPIO_PIN_OUTPUT_STATE_HIGH : GPIO_PIN_OUTPUT_STATE_LOW);
+        for (volatile uint32_t i = 0; i < 8000000u; ++i) {}
+        for (int k = 0; k < 6; ++k) led_drv[k]->SetValue(led_pin_no[k], GPIO_PIN_OUTPUT_STATE_LOW);
     }
+}
+
+__attribute__((naked)) void HardFault_Handler(void)
+{
+    __asm volatile(
+        "tst lr, #4 \n"
+        "ite eq \n"
+        "mrseq r0, msp \n"
+        "mrsne r0, psp \n"
+        "mov r1, lr \n"
+        "b bunny_fault_report \n");
 }
 
 /* ---- sprite: NN output -> screen --------------------------------------- */
 
 #define MAX_NN  96
-#define MAX_SPR 320
+#define MAX_SPR 480
 
 static uint8_t  src_rgb[MAX_NN * MAX_NN * 3];
 static uint16_t tab_i0[MAX_SPR];
@@ -421,9 +487,25 @@ static void hatch(void)
 
 void bunny_demo_loop(void)
 {
-    int display_rc = display_init();
     DCB->DEMCR |= DCB_DEMCR_TRCENA_Msk;
     DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    bunny_boot_led(0, 0, 1);  /* blue: model loaded, starting the display */
+    /* After a USB power-on the display init hung (a RESET always worked):
+     * give the panel and its supplies time to come up first. */
+    busy_ms(COLD_START_MS);
+
+    /* The LCD's DPHY needs the SE's 20 MHz clock; after some power cycles the
+     * first request fails, so re-request it and retry the display a few times. */
+    int display_rc = -1;
+    for (int attempt = 0; attempt < 5 && display_rc != 0; ++attempt) {
+        if (attempt > 0) {
+            uint32_t err = 0;
+            SERVICES_clocks_enable_clock(se_services_s_handle, CLKEN_CLK_20M, true, &err);
+            busy_ms(300);
+        }
+        display_rc = display_init();
+        printf("bunny: display_init attempt %d -> %d\n", attempt + 1, display_rc);
+    }
     /* The camera opens I2C1 first so its callback owns the bus (touch polls) */
     int camera_rc = camera_init();
     int mic_rc = mic_init();
@@ -433,8 +515,14 @@ void bunny_demo_loop(void)
     printf("bunny: display=%d camera=%d mic=%d touch=%d imu=%d\n", display_rc, camera_rc, mic_rc, touch_rc, imu_rc);
     if (display_rc != 0) {
         printf("bunny: no display, stopping\n");
-        for (;;) {}
+        for (;;) {  /* blinking red: display failed */
+            bunny_boot_led(1, 0, 0);
+            busy_ms(150);
+            bunny_boot_led(0, 0, 0);
+            busy_ms(150);
+        }
     }
+    bunny_boot_led(0, 1, 0);  /* green: display up */
 
     int w = display_width(), h = display_height();
     fill_rect(0, 0, w, h, 255, 255, 255);
@@ -460,11 +548,17 @@ void bunny_demo_loop(void)
     printf("bunny: NN draws %dx%d, shown at %dx%d\n", nn_side, nn_side, spr, spr);
 
     state_t st = ST_IDLE;
+    /* The bunny fills only the middle of its square, so let the square go
+     * partly off-screen: the whole width stays usable for wandering. */
+    float x_min = -EDGE_FRAC * (float)spr, x_max = (float)(w - spr) + EDGE_FRAC * (float)spr;
     float bx = (float)(w - spr) / 2.0f, target_x = bx;
     int facing_left = 0;
     float state_t_s = 0.0f, next_decision = 3.0f, idle_s = 0.0f, action_len = 0.0f;
     float perk = 0.0f, hold_s = 0.0f;
     int touching = 0, touch_x = 0, touch_y = 0, hatched_this_hold = 0;
+    float since_finger = 1.0f;  /* s since the last finger-down report */
+    float touch_pause = 0.0f, imu_last = 0.0f;
+    int touch_fails = 0, imu_fails = 0;
     uint32_t was_pressed = 0, frame = 0, nn_us_acc = 0;
     rect_t prev = {0, 0, 0, 0}, prev_dot = {0, 0, 0, 0};
     uint32_t t_prev = DWT->CYCCNT, t_stat = t_prev;
@@ -479,26 +573,62 @@ void bunny_demo_loop(void)
 
         /* ---- inputs ---- */
         int any_input = 0, poked = 0;
-        if (touch_rc == 0) {
+        uint32_t st0 = DWT->CYCCNT, us_touch = 0, us_imu = 0, us_mic = 0, us_nn = 0, us_draw = 0;
+        if (touch_pause > 0.0f) touch_pause -= dt;
+        if (touch_rc == 0 && touch_pause <= 0.0f) {
             int tx, ty, r = gt_poll(&tx, &ty);
+            if (r < 0) {
+                if (++touch_fails >= SENSOR_FAILS) {  /* bus trouble: pause touch for 1 s */
+                    printf("touch: %d failed reads, pausing 1 s\n", touch_fails);
+                    touch_pause = 1.0f;
+                    touch_fails = 0;
+                }
+            } else {
+                touch_fails = 0;
+            }
+            if (r == 1 && (tx >= w || ty >= h)) {
+                r = 0;  /* ignore coordinates off the panel */
+            }
+            since_finger += dt;
             if (r == 1) {
-                if (!touching) poked = 1;
+                since_finger = 0.0f;
+                if (!touching) {
+                    poked = 1;
+                    printf("touch: down x=%d y=%d frame %lu\n", tx, ty, (unsigned long)frame);
+                }
                 touching = 1;
                 touch_x = tx;
                 touch_y = ty;
                 any_input = 1;
-            } else if (r == 2) {
-                touching = 0;
+            } else if (touching && since_finger > RELEASE_S) {
+                touching = 0;  /* finger lifted */
             }
         }
-        int on_bunny = touching && touch_x >= (int)bx && touch_x < (int)bx + spr &&
-                       touch_y >= GROUND_Y - spr && touch_y < GROUND_Y;
+        /* hit box: the middle of the sprite square, where the bunny is drawn */
+        int on_bunny = touching && touch_x >= (int)bx + spr / 5 && touch_x < (int)bx + spr * 4 / 5 &&
+                       touch_y >= GROUND_Y - spr * 17 / 20 && touch_y < GROUND_Y;
 
+        us_touch = us_since(st0);
+        uint32_t st1 = DWT->CYCCNT;
         float motion = 0.0f;
-        if (imu_rc == 0) imu_poll(&motion, NULL, NULL, NULL);
+        if (imu_rc == 0 && frame % IMU_EVERY == 0) {
+            imu_poll(&imu_last, NULL, NULL, NULL);
+            us_imu = us_since(st1);
+            if (us_imu > IMU_SLOW_US) {
+                if (++imu_fails >= SENSOR_FAILS) {  /* the I3C bus keeps timing out: stop using it */
+                    printf("imu: %d slow reads (%lu us), IMU off\n", imu_fails, (unsigned long)us_imu);
+                    imu_rc = -9;
+                }
+            } else {
+                imu_fails = 0;
+            }
+        }
+        motion = imu_last;
+        uint32_t st2 = DWT->CYCCNT;
         float level = 0.0f;
         int loud = 0;
-        while (mic_rc == 0 && mic_poll(&level) == 1) {
+        int mic_blocks_now = 0;
+        while (mic_rc == 0 && mic_blocks_now++ < 8 && mic_poll(&level) == 1) {
             float db = level > 1.0f ? 20.0f * log10f(level) : 0.0f;
             memmove(graph_db, graph_db + 1, sizeof(graph_db) - sizeof(graph_db[0]));
             graph_db[GRAPH_N - 1] = db;
@@ -575,8 +705,8 @@ void bunny_demo_loop(void)
                 break;
             case ST_WANDER: {
                 float dist = target_x - bx;
-                if (target_x < 0.0f) target_x = 0.0f;
-                if (target_x > (float)(w - spr)) target_x = (float)(w - spr);
+                if (target_x < x_min) target_x = x_min;
+                if (target_x > x_max) target_x = x_max;
                 if (fabsf(dist) < 4.0f) {
                     st = ST_IDLE;
                     set_clip(CLIP_IDLE);
@@ -602,7 +732,7 @@ void bunny_demo_loop(void)
                     state_t_s = 0.0f;
                     next_decision = frand(3.0f, 6.0f);
                     if (r < 0.55f) {
-                        target_x = frand(0.0f, (float)(w - spr));
+                        target_x = frand(x_min, x_max);
                         st = ST_WANDER;
                     } else if (r < 0.8f) {
                         set_clip(CLIP_LOOK);
@@ -647,11 +777,14 @@ void bunny_demo_loop(void)
 
         /* ---- NN: the Ethos-U85 draws the bunny ---- */
         bunny_normalize(shown.d, nn_in);
+        us_mic = us_since(st2);
         uint32_t c0 = DWT->CYCCNT;
         int rc = nn_forward(nn_in, BUNNY_NDIAL, &out, &n_out);
         nn_us_acc += (DWT->CYCCNT - c0) / (SystemCoreClock / 1000000u);
         if (rc == 0) convert_output(out);
 
+        us_nn = us_since(c0);
+        uint32_t st3 = DWT->CYCCNT;
         /* ---- draw ---- */
         float k = (float)spr / 512.0f;
         int ox = (int)bx + (int)(shown.dx * k);
@@ -669,13 +802,19 @@ void bunny_demo_loop(void)
         }
         draw_graph(w, h);
         display_flush();
+        us_draw = us_since(st3);
+        if (us_since(st0) > SLOW_FRAME_MS * 1000u) {
+            printf("slow frame %lu: touch %lu us, imu %lu us, mic %lu us, nn %lu us, draw %lu us\n",
+                   (unsigned long)frame, (unsigned long)us_touch, (unsigned long)us_imu, (unsigned long)us_mic,
+                   (unsigned long)us_nn, (unsigned long)us_draw);
+        }
 
         /* LEDs follow the mood */
         if (clip == CLIP_LOVE) leds_rgb(1, 0, 1);
         else if (clip == CLIP_SHAKE) leds_rgb(1, 1, 0);
         else if (clip == CLIP_HOP || clip == CLIP_CLAP) leds_rgb(0, 1, 0);
         else if (perk > 0.0f) leds_rgb(0, 0, 1);
-        else leds_rgb(0, 0, 0);
+        else leds_rgb(0, ((now / (SystemCoreClock / 2U)) & 3U) == 0U, 0);  /* slow green heartbeat */
 
         if (++frame % 60 == 0) {
             uint32_t t1 = DWT->CYCCNT;

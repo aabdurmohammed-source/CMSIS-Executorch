@@ -26,7 +26,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from bunny_decoder import BunnyDecoder, normalize_dials  # noqa: E402
 
-SIZE = int(os.environ.get("BUNNY_SIZE", "48"))
+SIZE = int(os.environ.get("BUNNY_SIZE", "64"))
 WIDTH = float(os.environ.get("BUNNY_WIDTH", "0.5"))
 MINUTES = float(os.environ.get("TRAIN_MINUTES", "17"))
 BATCH = int(os.environ.get("BATCH", "64"))
