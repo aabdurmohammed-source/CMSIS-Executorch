@@ -20,6 +20,7 @@
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "RTE_Components.h"
@@ -89,7 +90,8 @@ extern int nn_forward(const float *in, int n_in, const float **out, int *n_out);
 #define AR_RETURN       0.5f    /* 1/s: drift back to the middle when still   */
 
 volatile uint32_t g_bunny_nn_us, g_bunny_fps;  /* debugger-readable */
-volatile int32_t g_force_world = -1;  /* debugger-writable: 1 = camera world, 0 = home (acts like a tap on the button) */
+volatile int32_t g_force_world = -1;
+volatile int32_t g_test_doodle = 0;  /* debugger-writable: 1 = draw a star, 2 = a house, 3 = a smiley (remote test) */  /* debugger-writable: 1 = camera world, 0 = home (acts like a tap on the button) */
 
 #define SLOW_FRAME_MS   150     /* a frame slower than this prints its stage times */
 #define IMU_EVERY       3       /* read the IMU every Nth frame                     */
@@ -385,6 +387,46 @@ static void convert_output(const float *out)
 }
 
 /* Bilinear scale src_rgb to spr x spr at (ox, oy), mirrored if flip */
+/* ---- ink layer: a 1-bit mask of the finger drawing ------------------------ */
+/* Everything that paints background (the sprite's white, clearing, the camera)
+ * puts ink back where the mask is set, so the drawing never flickers. */
+#define INK_W   480
+#define INK_H   700                 /* = GRAPH_Y0 */
+#define INK_R   70                  /* ink colour */
+#define INK_G   40
+#define INK_B   95
+static uint8_t ink_mask[INK_W * INK_H / 8];
+static int ink_any;
+
+static inline int ink_at(int x, int y)
+{
+    if (!ink_any || x < 0 || x >= INK_W || y < 0 || y >= INK_H) return 0;
+    int i = y * INK_W + x;
+    return (ink_mask[i >> 3] >> (i & 7)) & 1;
+}
+
+/* Background (white, or ink where drawn) over a rectangle */
+static void fill_bg(int x0, int y0, int x1, int y1)
+{
+    if (!ink_any) {
+        fill_rect(x0, y0, x1, y1, 255, 255, 255);
+        return;
+    }
+    uint8_t *fb = display_buffer();
+    int w = display_width(), h = display_height(), bpp = display_bytes_per_pixel();
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > w) x1 = w;
+    if (y1 > h) y1 = h;
+    for (int y = y0; y < y1; ++y) {
+        uint8_t *p = fb + ((size_t)y * (size_t)w + (size_t)x0) * (size_t)bpp;
+        for (int x = x0; x < x1; ++x, p += bpp) {
+            if (ink_at(x, y)) write_px(p, bpp, INK_R, INK_G, INK_B);
+            else write_px(p, bpp, 255, 255, 255);
+        }
+    }
+}
+
 /* One screen row of the sprite: row y (0..spr-1) of the scaled sprite at (ox, oy) */
 static void draw_sprite_row(int ox, int oy, int flip, int key, int y)
 {
@@ -409,7 +451,13 @@ static void draw_sprite_row(int ox, int oy, int flip, int key, int y)
         uint8_t r = (uint8_t)((v[0] * wx0 + v[3] * wx) >> 8);
         uint8_t g = (uint8_t)((v[1] * wx0 + v[4] * wx) >> 8);
         uint8_t b = (uint8_t)((v[2] * wx0 + v[5] * wx) >> 8);
-        if (key && r > KEY_WHITE && g > KEY_WHITE && b > KEY_WHITE) continue;  /* see-through */
+        if (r > KEY_WHITE && g > KEY_WHITE && b > KEY_WHITE) {
+            if (key) continue;  /* see-through over the camera */
+            if (ink_at(ox + x, sy)) {  /* the drawing shows through the white */
+                write_px(row + (size_t)(ox + x) * (size_t)bpp, bpp, INK_R, INK_G, INK_B);
+                continue;
+            }
+        }
         write_px(row + (size_t)(ox + x) * (size_t)bpp, bpp, r, g, b);
     }
 }
@@ -441,7 +489,8 @@ static void draw_camera_bg(int w, int y1, int sox, int soy, int sflip)
         for (int x = 0; x < w; ++x, p += bpp) {
             const uint8_t *q = src + (size_t)cam_x[x] * 2;
             uint16_t v = (uint16_t)(q[0] | (q[1] << 8));
-            write_px(p, bpp, (uint8_t)((v >> 11) << 3), (uint8_t)(((v >> 5) & 0x3F) << 2), (uint8_t)((v & 0x1F) << 3));
+            if (ink_at(x, y)) write_px(p, bpp, INK_R, INK_G, INK_B);
+            else write_px(p, bpp, (uint8_t)((v >> 11) << 3), (uint8_t)(((v >> 5) & 0x3F) << 2), (uint8_t)((v & 0x1F) << 3));
         }
         draw_sprite_row(sox, soy, sflip, 1, y - soy);
     }
@@ -454,14 +503,14 @@ static void clear_uncovered(rect_t old, rect_t cur)
 {
     if (old.x1 <= old.x0) return;
     if (cur.x1 <= old.x0 || cur.x0 >= old.x1 || cur.y1 <= old.y0 || cur.y0 >= old.y1) {
-        fill_rect(old.x0, old.y0, old.x1, old.y1, 255, 255, 255);
+        fill_bg(old.x0, old.y0, old.x1, old.y1);
         return;
     }
-    if (old.y0 < cur.y0) fill_rect(old.x0, old.y0, old.x1, cur.y0, 255, 255, 255);
-    if (old.y1 > cur.y1) fill_rect(old.x0, cur.y1, old.x1, old.y1, 255, 255, 255);
+    if (old.y0 < cur.y0) fill_bg(old.x0, old.y0, old.x1, cur.y0);
+    if (old.y1 > cur.y1) fill_bg(old.x0, cur.y1, old.x1, old.y1);
     int ya = old.y0 > cur.y0 ? old.y0 : cur.y0, yb = old.y1 < cur.y1 ? old.y1 : cur.y1;
-    if (old.x0 < cur.x0) fill_rect(old.x0, ya, cur.x0, yb, 255, 255, 255);
-    if (old.x1 > cur.x1) fill_rect(cur.x1, ya, old.x1, yb, 255, 255, 255);
+    if (old.x0 < cur.x0) fill_bg(old.x0, ya, cur.x0, yb);
+    if (old.x1 > cur.x1) fill_bg(cur.x1, ya, old.x1, yb);
 }
 
 /* Effects at rig coordinates (512 canvas, see bunny_rig3.bunny_svg) */
@@ -494,6 +543,175 @@ static void draw_effects(const bunny_pose_t *p, int ox, int oy, int flip)
     }
 #undef FX
 #undef FY
+}
+
+/* ---- tiny 5x7 font (speech bubbles) ---------------------------------------- */
+
+static const uint8_t font5x7[28][7] = {
+    {0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11}, {0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E},  /* A B */
+    {0x0E, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0E}, {0x1E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1E},  /* C D */
+    {0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F}, {0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10},  /* E F */
+    {0x0E, 0x11, 0x10, 0x17, 0x11, 0x11, 0x0F}, {0x11, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11},  /* G H */
+    {0x0E, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0E}, {0x07, 0x02, 0x02, 0x02, 0x02, 0x12, 0x0C},  /* I J */
+    {0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11}, {0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F},  /* K L */
+    {0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11}, {0x11, 0x11, 0x19, 0x15, 0x13, 0x11, 0x11},  /* M N */
+    {0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E}, {0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10},  /* O P */
+    {0x0E, 0x11, 0x11, 0x11, 0x15, 0x12, 0x0D}, {0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11},  /* Q R */
+    {0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E}, {0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04},  /* S T */
+    {0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E}, {0x11, 0x11, 0x11, 0x11, 0x11, 0x0A, 0x04},  /* U V */
+    {0x11, 0x11, 0x11, 0x15, 0x15, 0x15, 0x0A}, {0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11},  /* W X */
+    {0x11, 0x11, 0x0A, 0x04, 0x04, 0x04, 0x04}, {0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F},  /* Y Z */
+    {0x0E, 0x11, 0x01, 0x02, 0x04, 0x00, 0x04}, {0x04, 0x04, 0x04, 0x04, 0x04, 0x00, 0x04},  /* ? ! */
+};
+
+/* Upper-case text (A-Z, space, ?, !) with s x s pixel dots; returns the width */
+static int draw_text(int x, int y, const char *t, int sc, uint8_t r, uint8_t g, uint8_t b)
+{
+    int x0 = x;
+    for (; *t; ++t) {
+        char c = *t;
+        if (c >= 'a' && c <= 'z') c = (char)(c - 32);
+        int gi = (c >= 'A' && c <= 'Z') ? c - 'A' : (c == '?' ? 26 : (c == '!' ? 27 : -1));
+        if (gi >= 0) {
+            for (int row = 0; row < 7; ++row) {
+                for (int col = 0; col < 5; ++col) {
+                    if (font5x7[gi][row] & (0x10 >> col)) {
+                        fill_rect(x + col * sc, y + row * sc, x + (col + 1) * sc, y + (row + 1) * sc, r, g, b);
+                    }
+                }
+            }
+        }
+        x += 6 * sc;
+    }
+    return x - x0;
+}
+
+/* ---- doodles: finger drawing -> doodle classifier on the NPU --------------- */
+
+extern int doodle_classify(const float *in, float *scores, int n);
+
+#define INK_MAX       1500    /* stored stroke points (x = -1 marks a pen lift) */
+#define INK_THICK     9       /* px, on screen                                  */
+#define DRAG_START_PX 18      /* a touch that moves this far draws instead of tapping */
+#define INK_IDLE_S    0.9f    /* finger lifted this long -> recognise the drawing */
+#define BUBBLE_S      3.0f    /* speech bubble (and the drawing) stays this long */
+#define DOODLE_MIN_P  0.45f   /* below this confidence the bunny is confused     */
+
+static const char *const doodle_names[8] = {"STAR", "SUN", "HOUSE", "CAT", "FLOWER", "FISH", "SMILEY FACE", "LIGHTNING"};
+/* how the bunny reacts to each class (same order) */
+static const bunny_clip_t doodle_react[8] = {CLIP_CLAP, CLIP_STRETCH, CLIP_HOP, CLIP_SHAKE, CLIP_LOVE, CLIP_EAT, CLIP_WAVE, CLIP_SHAKE};
+
+static int16_t ink_x[INK_MAX], ink_y[INK_MAX];
+static int ink_n;
+static int ink_x0 = 9999, ink_y0 = 9999, ink_x1 = -1, ink_y1 = -1;  /* bounding box */
+
+/* Thick segment into the ink mask (and onto the screen once) */
+static void ink_stamp(int x0, int y0, int x1, int y1)
+{
+    int n = abs(x1 - x0) > abs(y1 - y0) ? abs(x1 - x0) : abs(y1 - y0);
+    if (n < 1) n = 1;
+    int r = INK_THICK / 2;
+    for (int k = 0; k <= n; ++k) {
+        int cx = x0 + (x1 - x0) * k / n, cy = y0 + (y1 - y0) * k / n;
+        for (int dy = -r; dy <= r; ++dy) {
+            for (int dx = -r; dx <= r; ++dx) {
+                int x = cx + dx, y = cy + dy;
+                if (dx * dx + dy * dy > r * r + 1 || x < 0 || x >= INK_W || y < 0 || y >= INK_H) continue;
+                int i = y * INK_W + x;
+                ink_mask[i >> 3] |= (uint8_t)(1u << (i & 7));
+            }
+        }
+    }
+    ink_any = 1;
+    thick_line(x0, y0, x1, y1, INK_THICK, INK_R, INK_G, INK_B);
+}
+
+static void ink_add(int x, int y)
+{
+    if (ink_n >= INK_MAX) return;
+    if (x >= 0 && ink_n > 0 && ink_x[ink_n - 1] >= 0) ink_stamp(ink_x[ink_n - 1], ink_y[ink_n - 1], x, y);
+    ink_x[ink_n] = (int16_t)x;
+    ink_y[ink_n] = (int16_t)y;
+    ++ink_n;
+    if (x >= 0) {
+        if (x < ink_x0) ink_x0 = x;
+        if (y < ink_y0) ink_y0 = y;
+        if (x > ink_x1) ink_x1 = x;
+        if (y > ink_y1) ink_y1 = y;
+    }
+}
+
+static void ink_draw(void)
+{
+    for (int i = 1; i < ink_n; ++i) {
+        if (ink_x[i] < 0 || ink_x[i - 1] < 0) continue;
+        thick_line(ink_x[i - 1], ink_y[i - 1], ink_x[i], ink_y[i], INK_THICK, 70, 40, 95);
+    }
+}
+
+static void ink_clear(int cam_mode)
+{
+    if (ink_any) memset(ink_mask, 0, sizeof(ink_mask));
+    ink_any = 0;
+    if (!cam_mode && ink_x1 >= 0) {
+        fill_rect(ink_x0 - INK_THICK, ink_y0 - INK_THICK, ink_x1 + INK_THICK, ink_y1 + INK_THICK, 255, 255, 255);
+    }
+    ink_n = 0;
+    ink_x0 = ink_y0 = 9999;
+    ink_x1 = ink_y1 = -1;
+}
+
+/* Strokes -> 28x28 like Quick, Draw! (white ink on black, fitted to ~24 px and
+ * centred, ~1.5 px lines): drawn at 4x resolution, then averaged down. */
+static void ink_rasterize(float *out28)
+{
+    static uint8_t big[112 * 112];
+    memset(big, 0, sizeof(big));
+    int bw = ink_x1 - ink_x0, bh = ink_y1 - ink_y0;
+    int span = bw > bh ? bw : bh;
+    if (span < 1) span = 1;
+    float sc = 96.0f / (float)span;
+    float offx = 8.0f + (96.0f - (float)bw * sc) / 2.0f, offy = 8.0f + (96.0f - (float)bh * sc) / 2.0f;
+    for (int i = 1; i < ink_n; ++i) {
+        if (ink_x[i] < 0 || ink_x[i - 1] < 0) continue;
+        float ax = offx + (float)(ink_x[i - 1] - ink_x0) * sc, ay = offy + (float)(ink_y[i - 1] - ink_y0) * sc;
+        float bx2 = offx + (float)(ink_x[i] - ink_x0) * sc, by2 = offy + (float)(ink_y[i] - ink_y0) * sc;
+        int n = (int)(fabsf(bx2 - ax) > fabsf(by2 - ay) ? fabsf(bx2 - ax) : fabsf(by2 - ay)) + 1;
+        for (int k = 0; k <= n; ++k) {
+            int cx = (int)(ax + (bx2 - ax) * (float)k / (float)n), cy = (int)(ay + (by2 - ay) * (float)k / (float)n);
+            for (int dy = -3; dy <= 3; ++dy) {
+                for (int dx = -3; dx <= 3; ++dx) {
+                    int px = cx + dx, py = cy + dy;
+                    if (px >= 0 && px < 112 && py >= 0 && py < 112 && dx * dx + dy * dy <= 10) big[py * 112 + px] = 255;
+                }
+            }
+        }
+    }
+    float mx = 0.0f;
+    for (int y = 0; y < 28; ++y) {
+        for (int x = 0; x < 28; ++x) {
+            int sum = 0;
+            for (int j = 0; j < 4; ++j) {
+                for (int i = 0; i < 4; ++i) sum += big[(y * 4 + j) * 112 + x * 4 + i];
+            }
+            float v = (float)sum / (16.0f * 255.0f);
+            out28[y * 28 + x] = v;
+            if (v > mx) mx = v;
+        }
+    }
+    if (mx > 0.0f) {
+        for (int i = 0; i < 28 * 28; ++i) out28[i] /= mx;
+    }
+}
+
+/* Speech bubble at the top of the screen */
+static void draw_bubble(const char *text, int w)
+{
+    int sc = 4, tw = (int)strlen(text) * 6 * sc - sc;
+    int x0 = (w - tw) / 2 - 16, y0 = 24, x1 = x0 + tw + 32, y1 = y0 + 7 * sc + 28;
+    fill_rect(x0, y0, x1, y1, 120, 80, 200);
+    fill_rect(x0 + 4, y0 + 4, x1 - 4, y1 - 4, 255, 255, 255);
+    draw_text(x0 + 16, y0 + 14, text, sc, 70, 40, 95);
 }
 
 /* ---- mic graph --------------------------------------------------------- */
@@ -647,6 +865,10 @@ void bunny_demo_loop(void)
     int touching = 0, touch_x = 0, touch_y = 0, hatched_this_hold = 0;
     float since_finger = 1.0f;  /* s since the last finger-down report */
     float touch_pause = 0.0f, imu_last = 0.0f;
+    /* doodles */
+    int tap_candidate = 0, drawing = 0, was_touching = 0, start_x = 0, start_y = 0;
+    float ink_idle = 0.0f, bubble_t = 0.0f;
+    char bubble_text[24] = "";
     int touch_fails = 0, imu_fails = 0;
     uint32_t was_pressed = 0, frame = 0, nn_us_acc = 0;
     rect_t prev = {0, 0, 0, 0}, prev_dot = {0, 0, 0, 0};
@@ -746,6 +968,38 @@ void bunny_demo_loop(void)
         int on_bunny = touching && touch_x >= bxa + spr / 5 && touch_x < bxa + spr * 4 / 5 &&
                        touch_y >= GROUND_Y - spr * 17 / 20 && touch_y < GROUND_Y;
 
+        /* empty screen: a short tap = run there (on release), a drag = draw */
+        int tap_run = 0;
+        if (poked && !on_bunny && touch_y < GRAPH_Y0) {
+            tap_candidate = 1;
+            start_x = touch_x;
+            start_y = touch_y;
+            if (bubble_t > 0.0f) {  /* start a new drawing right away */
+                bubble_t = 0.0f;
+                ink_clear(cam_mode);
+            }
+        }
+        if (touching && tap_candidate) {
+            int ddx = touch_x - start_x, ddy = touch_y - start_y;
+            if (!drawing && ddx * ddx + ddy * ddy > DRAG_START_PX * DRAG_START_PX) {
+                drawing = 1;
+                if (ink_n > 0) ink_add(-1, -1);  /* pen lift between strokes */
+                ink_add(start_x, start_y);
+            }
+            if (drawing && touch_y < GRAPH_Y0) {
+                int lx = ink_x[ink_n - 1], ly = ink_y[ink_n - 1];
+                if ((touch_x - lx) * (touch_x - lx) + (touch_y - ly) * (touch_y - ly) > 9) ink_add(touch_x, touch_y);
+            }
+            ink_idle = 0.0f;
+        }
+        if (!touching && was_touching && tap_candidate) {
+            if (!drawing) tap_run = 1;
+            tap_candidate = 0;
+            drawing = 0;
+        }
+        was_touching = touching;
+        if (ink_n > 0 && !touching && bubble_t <= 0.0f) ink_idle += dt;
+
         us_touch = us_since(st0);
         uint32_t st1 = DWT->CYCCNT;
         float motion = 0.0f;
@@ -826,7 +1080,7 @@ void bunny_demo_loop(void)
                 set_clip(act);
                 action_len = bunny_clip_duration(act) * (act == CLIP_HOP || act == CLIP_LOVE ? 1.0f : 1.5f);
                 state_t_s = 0.0f;
-            } else if (poked && !on_bunny) {  /* run to where you touched */
+            } else if (tap_run) {  /* run to where you tapped */
                 target_x = (float)touch_x - ar_off - (float)spr / 2.0f;
                 st = ST_WANDER;
                 state_t_s = 0.0f;
@@ -882,6 +1136,85 @@ void bunny_demo_loop(void)
             }
         }
         perk = loud ? 1.2f : (perk > dt ? perk - dt : 0.0f);
+
+        if (g_test_doodle) {  /* remote test: draw a shape as if by finger */
+            int t = g_test_doodle;
+            g_test_doodle = 0;
+            ink_clear(cam_mode);
+            int cx = w / 2, cy = 300;
+            if (t == 1) {  /* 5-point star, one stroke */
+                for (int i = 0; i <= 10; ++i) {
+                    float a = -1.5708f + (float)i * 2.5133f;  /* every 144 degrees */
+                    ink_add(cx + (int)(130.0f * cosf(a)), cy + (int)(130.0f * sinf(a)));
+                }
+            } else if (t == 2) {  /* house: square + roof */
+                int xs[] = {cx - 100, cx - 100, cx + 100, cx + 100, cx - 100, cx, cx + 100};
+                int ys[] = {cy + 120, cy - 20, cy - 20, cy + 120, cy + 120, cy - 20, cy - 20};
+                for (int i = 0; i < 5; ++i) ink_add(xs[i], ys[i]);
+                ink_add(-1, -1);
+                ink_add(cx - 115, cy - 20);
+                ink_add(cx, cy - 130);
+                ink_add(cx + 115, cy - 20);
+            } else {  /* smiley: face circle, two eyes, mouth */
+                for (int i = 0; i <= 40; ++i) {
+                    float a = (float)i * 0.15708f;
+                    ink_add(cx + (int)(120.0f * cosf(a)), cy + (int)(120.0f * sinf(a)));
+                }
+                ink_add(-1, -1); ink_add(cx - 45, cy - 40); ink_add(cx - 44, cy - 25);
+                ink_add(-1, -1); ink_add(cx + 45, cy - 40); ink_add(cx + 44, cy - 25);
+                ink_add(-1, -1);
+                for (int i = 0; i <= 12; ++i) {
+                    float a = 0.4f + (float)i * 0.195f;
+                    ink_add(cx + (int)(70.0f * cosf(a)), cy + 10 + (int)(60.0f * sinf(a)));
+                }
+            }
+            ink_idle = INK_IDLE_S + 1.0f;
+            bubble_t = 0.0f;
+        }
+        if (ink_n > 0 && ink_idle > INK_IDLE_S && bubble_t <= 0.0f) {
+            static float in28[28 * 28];
+            float sc8[8];
+            ink_rasterize(in28);
+            uint32_t dc0 = DWT->CYCCNT;
+            int nd = doodle_classify(in28, sc8, 8);
+            uint32_t dus = us_since(dc0);
+            if (nd == 8) {
+                int best = 0;
+                float mx = sc8[0], sum = 0.0f;
+                for (int i = 1; i < 8; ++i) if (sc8[i] > mx) { mx = sc8[i]; best = i; }
+                for (int i = 0; i < 8; ++i) sum += expf(sc8[i] - mx);
+                float pbest = 1.0f / sum;
+                printf("doodle: %s %d%% (%lu us)\n", doodle_names[best], (int)(pbest * 100.0f), (unsigned long)dus);
+                bunny_clip_t react = pbest >= DOODLE_MIN_P ? doodle_react[best] : CLIP_SAD;
+                if (pbest >= DOODLE_MIN_P) {
+                    snprintf(bubble_text, sizeof(bubble_text), "%s!", doodle_names[best]);
+                } else {
+                    snprintf(bubble_text, sizeof(bubble_text), "???");
+                }
+                if (!cam_mode) fill_bg(0, 0, w, 100);
+                bubble_t = BUBBLE_S;
+                facing_left = (ink_x0 + ink_x1) / 2 < (int)(bx + ar_off) + spr / 2;
+                if (st != ST_LIE && st != ST_SLEEP) {
+                    st = ST_ACTION;
+                    set_clip(react);
+                    action_len = BUBBLE_S;
+                    state_t_s = 0.0f;
+                }
+                idle_s = 0.0f;
+            } else {
+                printf("doodle: classify failed (%d)\n", nd);
+                ink_clear(cam_mode);
+            }
+            ink_idle = 0.0f;
+        }
+        if (bubble_t > 0.0f) {
+            bubble_t -= dt;
+            if (bubble_t <= 0.0f) {  /* bubble and drawing go away */
+                ink_clear(cam_mode);
+                if (!cam_mode) fill_rect(0, 0, w, 100, 255, 255, 255);
+                prev = (rect_t){0, 0, 0, 0};
+            }
+        }
 
         /* ---- pose: clip, cross-fade, identity, perk, smoothing ---- */
         clip_t += dt;
@@ -951,6 +1284,7 @@ void bunny_demo_loop(void)
             draw_sprite(ox, oy, facing_left, 0);
         }
         draw_effects(&shown, ox, oy, facing_left);
+        if (bubble_t > 0.0f) draw_bubble(bubble_text, w);
         prev = cur;
         prev_dot = (rect_t){0, 0, 0, 0};
         if (touching && touch_y < GRAPH_Y0 - 8) {

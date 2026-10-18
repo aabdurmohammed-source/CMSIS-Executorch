@@ -149,6 +149,46 @@ extern "C" int face_mirror(const float* crop, uint8_t* pixels) {
 // Runs the model on in[0..n_in) (n_in must be the model's input size) and
 // points *out at its float output (valid until the next run), *n_out values.
 // Returns 0 on success.
+#ifdef BOARD_BUNNY_DEMO
+// Second program: the doodle classifier (board/DevKit-E8/doodle_pte.c, made by
+// model/doodle/export_doodle.py), with its own small memory pools.
+extern "C" const unsigned char doodle_pte[];
+extern "C" const unsigned long doodle_pte_size;
+namespace {
+constexpr size_t kDoodleIn = 28 * 28;
+alignas(16) uint8_t g_doodle_method_pool[256 * 1024] APP_POOL_ATTRIBUTES;
+alignas(16) uint8_t g_doodle_temp_pool[256 * 1024] APP_POOL_ATTRIBUTES;
+alignas(16) float g_doodle_in[kDoodleIn];
+EmbeddedModule* g_doodle = nullptr;
+Tensor* g_doodle_tensor = nullptr;
+}  // namespace
+
+// Classifies a 28x28 drawing (white strokes on black, 0..1, row major) and
+// writes up to n class scores (logits). Returns the number written, or < 0.
+extern "C" int doodle_classify(const float* in, float* scores, int n) {
+  if (g_doodle == nullptr || g_doodle_tensor == nullptr) {
+    return -1;
+  }
+  for (size_t i = 0; i < kDoodleIn; ++i) {
+    g_doodle_in[i] = in[i];
+  }
+  auto outputs = g_doodle->forward(*g_doodle_tensor);
+  if (!outputs.ok() || outputs->empty() || !outputs->front().isTensor()) {
+    return -2;
+  }
+  Tensor t = outputs->front().toTensor();
+  if (t.scalar_type() != ScalarType::Float) {
+    return -3;
+  }
+  const float* p = t.const_data_ptr<float>();
+  int k = static_cast<int>(t.numel()) < n ? static_cast<int>(t.numel()) : n;
+  for (int i = 0; i < k; ++i) {
+    scores[i] = p[i];
+  }
+  return k;
+}
+#endif
+
 extern "C" int nn_forward(const float* in, int n_in, const float** out, int* n_out) {
   if (g_module == nullptr || g_input == nullptr || static_cast<size_t>(n_in) != g_in_numel) {
     return -1;
@@ -275,6 +315,30 @@ extern "C" int app_main(void) {
            kRuns, (unsigned long)mhz);
   }
 #ifdef BOARD_BUNNY_DEMO
+  {
+    // The doodle classifier lives as long as the bunny loop (which never returns)
+    static EmbeddedModule doodle(
+        doodle_pte, doodle_pte_size,
+        std::make_unique<BufferDataLoader>(doodle_pte, doodle_pte_size),
+        std::make_unique<MemoryAllocator>(sizeof(g_doodle_method_pool), g_doodle_method_pool),
+        std::make_unique<MemoryAllocator>(sizeof(g_doodle_temp_pool), g_doodle_temp_pool));
+    static std::array<SizesType, 4> dsizes{1, 1, 28, 28};
+    static std::array<DimOrderType, 4> dorder{0, 1, 2, 3};
+    static TensorImpl dimpl(ScalarType::Float, 4, dsizes.data(), g_doodle_in, dorder.data());
+    static Tensor dtensor(&dimpl);
+    g_doodle = &doodle;
+    g_doodle_tensor = &dtensor;
+    float scores[16];
+    uint32_t c0 = DWT->CYCCNT;
+    int nd = doodle_classify(g_doodle_in, scores, 16);
+    uint32_t us = (DWT->CYCCNT - c0) / (SystemCoreClock / 1000000u);
+    printf("doodle: %lu byte model, test run -> %d classes, %lu us (first run, includes load)\n",
+           doodle_pte_size, nd, (unsigned long)us);
+    c0 = DWT->CYCCNT;
+    nd = doodle_classify(g_doodle_in, scores, 16);
+    us = (DWT->CYCCNT - c0) / (SystemCoreClock / 1000000u);
+    printf("doodle: classify %lu us on " NPU_NAME "\n", (unsigned long)us);
+  }
   bunny_demo_loop();
 #else
   face_demo_loop();

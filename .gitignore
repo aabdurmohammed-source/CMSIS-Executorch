@@ -90,3 +90,7 @@ fvp_stdout.log
 model/bunny/*.npz
 model/bunny/runs/
 model/bunny/*.log
+
+# Quick, Draw! data (downloaded by model/doodle/get_data.py)
+model/doodle/data/
+model/doodle/*.log

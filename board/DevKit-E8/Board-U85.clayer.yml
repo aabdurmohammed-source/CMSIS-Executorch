@@ -114,6 +114,7 @@ layer:
         - file: ./bunny_demo.c
         - file: ./bunny_clips.c
         - file: ./bunny_clips.h
+        - file: ./doodle_pte.c
         - file: ./display.c
         - file: ./display.h
         - file: ./camera.c

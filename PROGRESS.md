@@ -156,3 +156,11 @@ Branch `bunny` (from working-checkpoint 432c0e53). Kit + data in model/bunny/ (t
 - Fix 2 (create_ai_layer.py): AI_LAYER_A16W8=1 = 16-bit activations, 8-bit weights. Float-vs-quantized mean abs error 0.037 -> 0.003 (int8 head-fixed) ; visually identical to float.
 - Export: `AI_LAYER_A16W8=1 BUNNY_SIZE=64 .venv/Scripts/python.exe create_ai_layer.py cmsis-executorch.cbuild-mlops.yml` -> 13/13 ops on the U85, 364 KB weights, 385 KB scratch, 2.12 ms/frame on the board (was 1.42 ms in int8), 32 fps loop.
 - Applies to any new bunny size (e.g. the 128x128 run): same export command, no training change.
+
+## Doodle recognition (Sat Oct 17, night) - WORKS (tested remotely)
+- Data: Google Quick, Draw! (CC BY 4.0) 28x28 bitmaps, first 20k per class via HTTP range requests (model/doodle/get_data.py, data git-ignored). Classes: star, sun, house, cat, flower, fish, smiley face, lightning (no "heart" class exists).
+- Model: model/doodle/doodle_net.py (3x [conv3x3, ReLU, maxpool] + 2 linear), trained 6 epochs with shift/scale/rotate/thickness augmentation: 96.4% val accuracy (8000 held-out). Export: model/doodle/export_doodle.py -> board/DevKit-E8/doodle_pte.c, int8, 8/8 ops on the U85, 77 KB weights, 20 KB scratch, int8 agrees with float on 99.7%.
+- Firmware: second ExecuTorch program in app_main.cpp (doodle_classify(), own 256 KB pools). 0.28 ms per drawing on the U85 (0.36 ms first run). Two models share the U85 now: BunnyDecoder 2.1 ms + DoodleNet 0.3 ms.
+- Bunny UI: drag on empty screen = draw (tap still = run there); 0.9 s after lifting the finger the strokes are rasterised like Quick, Draw! (fit to 24 px, centred, ~1.5 px lines, 4x supersampled) and classified; bubble "STAR!" etc. (5x7 font), bunny faces the drawing and reacts (star clap, sun stretch, house hop, cat/lightning shake, flower love, fish eat, smiley wave; < 45% = "???" + sad). Drawing clears after 3 s. Ink layer (1-bit mask) keeps the drawing visible under/around the bunny without flicker, also over the camera.
+- Remote test hook g_test_doodle (1 star, 2 house, 3 smiley): STAR 98%, HOUSE 97%, SMILEY FACE 98%.
+- Note: J-Link savebin screenshots take seconds; rows read late can show a later frame.
