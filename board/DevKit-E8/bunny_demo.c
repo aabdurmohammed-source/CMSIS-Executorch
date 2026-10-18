@@ -596,10 +596,34 @@ static void draw_sprite(int ox, int oy, int flip, int key)
 
 /* Camera world background: the 640x480 frame scaled to fill the screen above
  * the graph strip (height-fit, centre-cropped left and right). */
+/* The MT9M114 picture is dim and washed out indoors: brighten it toward a
+ * target average (gain follows the last frame) and push the colours away from
+ * grey. Only what is shown changes; BlazeFace still sees the raw frame. */
+#define CAM_SAT         420     /* saturation x256 (420 = 1.64x)        */
+#define CAM_TARGET_Y    105     /* average brightness to aim for        */
+#define CAM_MAX_GAIN    3.0f
+#define CAM_GAMMA       0.85f   /* < 1 lifts the shadows                */
+
 static void draw_camera_bg(int w, int y1, int sox, int soy, int sflip)
 {
     static uint16_t cam_x[480];
     static int ready;
+    static uint8_t lut[256];
+    static float gain = 1.5f;
+    static uint32_t ysum, yn;
+    if (yn > 0) {  /* new gain from the last frame's brightness */
+        float mean = (float)ysum / (float)yn;
+        float g = (float)CAM_TARGET_Y / (mean > 1.0f ? mean : 1.0f);  /* mean = raw brightness */
+        g = g < 1.0f ? 1.0f : (g > CAM_MAX_GAIN ? CAM_MAX_GAIN : g);
+        gain += (g - gain) * 0.3f;
+        for (int v = 0; v < 256; ++v) {
+            float o = 255.0f * powf((float)v * gain / 255.0f > 1.0f ? 1.0f : (float)v * gain / 255.0f, CAM_GAMMA);
+            lut[v] = (uint8_t)(o > 255.0f ? 255.0f : o);
+        }
+        ysum = yn = 0;
+    } else if (!ready) {
+        for (int v = 0; v < 256; ++v) lut[v] = (uint8_t)v;
+    }
     const uint8_t *cam = camera_frame();
     int cw = camera_width(), ch = camera_height();
     if (!ready) {
@@ -616,8 +640,17 @@ static void draw_camera_bg(int w, int y1, int sox, int soy, int sflip)
         for (int x = 0; x < w; ++x, p += bpp) {
             const uint8_t *q = src + (size_t)cam_x[x] * 2;
             uint16_t v = (uint16_t)(q[0] | (q[1] << 8));
-            if (ink_at(x, y)) write_px(p, bpp, INK_R, INK_G, INK_B);
-            else write_px(p, bpp, (uint8_t)((v >> 11) << 3), (uint8_t)(((v >> 5) & 0x3F) << 2), (uint8_t)((v & 0x1F) << 3));
+            if (ink_at(x, y)) { write_px(p, bpp, INK_R, INK_G, INK_B); continue; }
+            int r = (v >> 11) << 3, g = ((v >> 5) & 0x3F) << 2, b = (v & 0x1F) << 3;
+            int yy = (77 * r + 150 * g + 29 * b) >> 8;
+            if (((x | y) & 7) == 0) { ysum += (uint32_t)yy; ++yn; }  /* raw brightness, sampled */
+            r = yy + (((r - yy) * CAM_SAT) >> 8);
+            g = yy + (((g - yy) * CAM_SAT) >> 8);
+            b = yy + (((b - yy) * CAM_SAT) >> 8);
+            r = r < 0 ? 0 : (r > 255 ? 255 : r);
+            g = g < 0 ? 0 : (g > 255 ? 255 : g);
+            b = b < 0 ? 0 : (b > 255 ? 255 : b);
+            write_px(p, bpp, lut[r], lut[g], lut[b]);
         }
         draw_sprite_row(sox, soy, sflip, 1, y - soy);
     }
@@ -650,12 +683,17 @@ static void draw_effects(const bunny_pose_t *p, int ox, int oy, int flip)
         float lie = p->d[D_LIE];
         float sx = -60.0f * lie, sy = 120.0f * lie;
         int t = spr / 60 + 2;
-        struct { float x, y, s; } z[3] = {{378, 80, 40}, {420, 50, 28}, {448, 26, 20}};
+        struct { float x, y, s; } z[3] = {{378, 82, 40}, {434, 38, 28}, {478, 4, 20}};
         for (int i = 0; i < 3; ++i) {
-            float x0 = z[i].x + sx, y0 = z[i].y + sy, s = z[i].s;
-            thick_line(FX(x0), FY(y0), FX(x0 + s), FY(y0), t, 70, 40, 95);
-            thick_line(FX(x0 + s), FY(y0), FX(x0), FY(y0 + s), t, 70, 40, 95);
-            thick_line(FX(x0), FY(y0 + s), FX(x0 + s), FY(y0 + s), t, 70, 40, 95);
+            float y0 = z[i].y + sy, s = z[i].s;
+            /* left edge of the letter, mirrored with the bunny; the Z itself is never mirrored */
+            float l = flip ? 512.0f - (z[i].x + sx) - s : z[i].x + sx;
+            int xa = ox + (int)(l * k), xb = ox + (int)((l + s) * k);
+            if (xa < 2) { xb += 2 - xa; xa = 2; }  /* keep the letter on the screen */
+            if (xb > 477) { xa -= xb - 477; xb = 477; }
+            thick_line(xa, FY(y0), xb, FY(y0), t, 70, 40, 95);
+            thick_line(xb, FY(y0), xa, FY(y0 + s), t, 70, 40, 95);
+            thick_line(xa, FY(y0 + s), xb, FY(y0 + s), t, 70, 40, 95);
         }
     }
     if (p->sweat > 0.3f) {

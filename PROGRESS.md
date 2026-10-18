@@ -243,3 +243,9 @@ Branch `bunny` (from working-checkpoint 432c0e53). Kit + data in model/bunny/ (t
 - TRAINED (14 epochs, ~31 min): val 92.3%, test 91.1% (test clips with background noise at 15 dB SNR; confusions mostly go/no/down). int8 export agrees with float on 99.3%. kws_pte.c 82 KB, 0.65 ms on the U85.
 - Tested on the board through the air (laptop TTS through its speaker -> board mic, push-to-talk triggered with g_force_listen): left 83%, yes 98%, stop 88%, happy 89%, up 90%, down 60%, go 83%, right 94%; "no" came out go 34% (-> "???", below the 55% bar). C features vs Python on the real recording: max diff 8e-6.
 - Note: a J-Link reset right after flashing once left the NPU busy ("Inference already running" from the bunny model at boot); a second reset fixed it.
+
+## Polish (Sun Oct 18, ~01:30)
+- zzz: farther apart (378,82 / 434,38 / 478,4 in rig px); when he faces left the Zs move to that side but the letters are no longer mirrored; kept on screen at the edges. Verified both directions with screenshots.
+- Camera colour (display only, BlazeFace still gets the raw frame): auto brightness (gain from the last frame's average toward 105, max 3x, gamma 0.85 via a LUT) + 1.64x saturation. Camera world 12 fps (unchanged).
+- Camera NOT delivering frames right now: every capture "stops" with no error flags but the buffer stays all zeros (a dark room would still give noise). Same as the touch issue earlier = sensor/ribbon state, not code. Needs a power cycle / ribbon check by Abdul. (Buffer moved 0x02722800 -> 0x02746800 with the KWS model, still the same SRAM bank; a reach problem would give a partial frame, not zeros.)
+- New helper: scratchpad shot.sh = screenshot of whichever frame buffer the LCD shows (reads 0x49031134), since buffer addresses move with every memory change.
