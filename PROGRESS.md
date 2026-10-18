@@ -135,3 +135,4 @@ Branch `bunny` (from working-checkpoint 432c0e53). Kit + data in model/bunny/ (t
   - app_main.cpp: nn_forward() generic call; bunny_demo_loop() under BOARD_BUNNY_DEMO.
 - Measured with the epoch-1 weights: 50 fps display loop, NN 0.92 ms in the loop.
 - Blocked: J-Link "cannot connect to the probe" after the board lost power; USB device present. Needs a real unplug/replug. Final-weights firmware is built, not yet flashed.
+- Recovered (Sat 17:20): J-Link still "cannot connect to the probe", but the SE answered over COM4 (M55-HP booted, power normal). Flashed the final 48x48 bunny through the SE with SETOOLS (new app TOC, HP_APP = our firmware at 0x80200000). Board runs again. Until J-Link works: tools/flash_se.sh (SW4 = SE to flash, then SW4 = U4 + replug). Gotcha added to HANDOFF.
