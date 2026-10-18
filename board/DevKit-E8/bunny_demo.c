@@ -91,7 +91,7 @@ extern int nn_forward(const float *in, int n_in, const float **out, int *n_out);
 
 volatile uint32_t g_bunny_nn_us, g_bunny_fps;  /* debugger-readable */
 volatile int32_t g_force_world = -1;
-volatile int32_t g_test_doodle = 0;  /* debugger-writable: 1 = draw a star, 2 = a house, 3 = a smiley (remote test) */  /* debugger-writable: 1 = camera world, 0 = home (acts like a tap on the button) */
+volatile int32_t g_test_doodle = 0;  /* debugger-writable: 1 star, 2 house, 3 smiley, 4 fish (remote test) */  /* debugger-writable: 1 = camera world, 0 = home (acts like a tap on the button) */
 
 #define SLOW_FRAME_MS   150     /* a frame slower than this prints its stage times */
 #define IMU_EVERY       3       /* read the IMU every Nth frame                     */
@@ -637,6 +637,26 @@ static int16_t ink_x[INK_MAX], ink_y[INK_MAX];
 static int ink_n;
 static int ink_x0 = 9999, ink_y0 = 9999, ink_x1 = -1, ink_y1 = -1;  /* bounding box */
 
+/* Thick segment into the ink mask only */
+static void mask_seg(int x0, int y0, int x1, int y1, int thick)
+{
+    int n = abs(x1 - x0) > abs(y1 - y0) ? abs(x1 - x0) : abs(y1 - y0);
+    if (n < 1) n = 1;
+    int r = thick / 2;
+    for (int k = 0; k <= n; ++k) {
+        int cx = x0 + (x1 - x0) * k / n, cy = y0 + (y1 - y0) * k / n;
+        for (int dy = -r; dy <= r; ++dy) {
+            for (int dx = -r; dx <= r; ++dx) {
+                int x = cx + dx, y = cy + dy;
+                if (dx * dx + dy * dy > r * r + 1 || x < 0 || x >= INK_W || y < 0 || y >= INK_H) continue;
+                int i = y * INK_W + x;
+                ink_mask[i >> 3] |= (uint8_t)(1u << (i & 7));
+            }
+        }
+    }
+    ink_any = 1;
+}
+
 /* Thick segment into the ink mask (and onto the screen once) */
 static void ink_stamp(int x0, int y0, int x1, int y1)
 {
@@ -681,16 +701,18 @@ static void ink_draw(void)
     }
 }
 
+static void world_rebuild(int cam_mode, int ex0, int ey0, int ex1, int ey1);
+
+/* Forget the live drawing (the world objects stay) */
 static void ink_clear(int cam_mode)
 {
-    if (ink_any) memset(ink_mask, 0, sizeof(ink_mask));
-    ink_any = 0;
-    if (!cam_mode && ink_x1 >= 0) {
-        fill_rect(ink_x0 - INK_THICK, ink_y0 - INK_THICK, ink_x1 + INK_THICK, ink_y1 + INK_THICK, 255, 255, 255);
-    }
+    int x0 = ink_x0 - INK_THICK, y0 = ink_y0 - INK_THICK, x1 = ink_x1 + INK_THICK, y1 = ink_y1 + INK_THICK;
+    int had = ink_x1 >= 0;
     ink_n = 0;
     ink_x0 = ink_y0 = 9999;
     ink_x1 = ink_y1 = -1;
+    if (had) world_rebuild(cam_mode, x0, y0, x1, y1);
+    else world_rebuild(cam_mode, 0, 0, -1, -1);
 }
 
 /* Strokes -> 28x28 like Quick, Draw! (white ink on black, fitted to ~24 px and
@@ -746,6 +768,198 @@ static void draw_bubble(const char *text, int w)
     draw_text(x0 + 16, y0 + 14, text, sc, 70, 40, 95);
 }
 
+/* ---- the bunny's world: drawings that come to life ------------------------ */
+/* A recognised drawing becomes an object made of its own strokes: it shrinks
+ * and moves to its place (floor or sky) and the bunny reacts to it. Objects
+ * live in the same ink mask as the live drawing, so they never flicker. */
+
+#define OBJ_MAX     4
+#define OBJ_PTS     320
+#define OBJ_THICK   6
+#define OBJ_PEN_UP  (-32768)
+#define FLOOR_Y     (GROUND_Y - 22)  /* where floor objects stand */
+#define HUNGER_S    180.0f           /* full -> empty                       */
+#define HUNGRY_AT   0.3f
+#define EAT_S       2.8f
+
+enum { C_STAR, C_SUN, C_HOUSE, C_CAT, C_FLOWER, C_FISH, C_SMILEY, C_LIGHTNING };
+
+typedef struct {
+    int active, cls, n;
+    uint32_t age;
+    int16_t px[OBJ_PTS], py[OBJ_PTS];  /* strokes relative to the drawing centre */
+    float x, y, s;                     /* current centre and scale */
+    float x0, y0, s0, x1, y1, s1;      /* animation from -> to */
+    float t, dur;                      /* animation time */
+    float life;                        /* seconds left, < 0 = stays */
+    float bite;                        /* 0..1 eaten (fish) */
+    int bx0, by0, bx1, by1;            /* last stamped box */
+} wobj_t;
+
+static wobj_t objs[OBJ_MAX];
+static uint32_t obj_age;
+
+static void obj_box(wobj_t *o, int *x0, int *y0, int *x1, int *y1)
+{
+    int a = 9999, b = 9999, c = -9999, d = -9999;
+    for (int i = 0; i < o->n; ++i) {
+        if (o->px[i] == OBJ_PEN_UP) continue;
+        int x = (int)(o->x + o->px[i] * o->s), y = (int)(o->y + o->py[i] * o->s);
+        if (x < a) a = x;
+        if (y < b) b = y;
+        if (x > c) c = x;
+        if (y > d) d = y;
+    }
+    *x0 = a - OBJ_THICK; *y0 = b - OBJ_THICK; *x1 = c + OBJ_THICK; *y1 = d + OBJ_THICK;
+}
+
+static void obj_stamp(wobj_t *o)
+{
+    int upto = o->n - (int)(o->bite * (float)o->n);  /* a fish loses points as it is eaten */
+    for (int i = 1; i < upto; ++i) {
+        if (o->px[i] == OBJ_PEN_UP || o->px[i - 1] == OBJ_PEN_UP) continue;
+        mask_seg((int)(o->x + o->px[i - 1] * o->s), (int)(o->y + o->py[i - 1] * o->s),
+                 (int)(o->x + o->px[i] * o->s), (int)(o->y + o->py[i] * o->s), OBJ_THICK);
+    }
+    obj_box(o, &o->bx0, &o->by0, &o->bx1, &o->by1);
+}
+
+/* Rebuild the mask (live drawing + objects) and repaint what changed */
+static void world_rebuild(int cam_mode, int ex0, int ey0, int ex1, int ey1)
+{
+    int ux0 = ex0, uy0 = ey0, ux1 = ex1, uy1 = ey1;
+#define GROW(a, b, c, d) do { if ((c) > (a)) { if (ux1 < ux0) { ux0 = (a); uy0 = (b); ux1 = (c); uy1 = (d); } \
+        else { if ((a) < ux0) ux0 = (a); if ((b) < uy0) uy0 = (b); if ((c) > ux1) ux1 = (c); if ((d) > uy1) uy1 = (d); } } } while (0)
+    for (int k = 0; k < OBJ_MAX; ++k) if (objs[k].bx1 > objs[k].bx0) GROW(objs[k].bx0, objs[k].by0, objs[k].bx1, objs[k].by1);
+    memset(ink_mask, 0, sizeof(ink_mask));
+    ink_any = 0;
+    for (int i = 1; i < ink_n; ++i) {
+        if (ink_x[i] < 0 || ink_x[i - 1] < 0) continue;
+        mask_seg(ink_x[i - 1], ink_y[i - 1], ink_x[i], ink_y[i], INK_THICK);
+    }
+    for (int k = 0; k < OBJ_MAX; ++k) {
+        if (objs[k].active) {
+            obj_stamp(&objs[k]);
+            GROW(objs[k].bx0, objs[k].by0, objs[k].bx1, objs[k].by1);
+        } else {
+            objs[k].bx0 = objs[k].bx1 = 0;
+        }
+    }
+#undef GROW
+    if (!cam_mode && ux1 > ux0) fill_bg(ux0, uy0, ux1, uy1);
+}
+
+/* Turn the live drawing into an object of class cls that moves to (tx, ty)
+ * with size tsize px; life < 0 = stays. Returns its index. */
+static int obj_from_ink(int cls, float tx, float ty, float tsize, float life)
+{
+    int k = -1;
+    for (int i = 0; i < OBJ_MAX; ++i) if (objs[i].active && (cls == C_SUN || cls == C_HOUSE) && objs[i].cls == cls) k = i;  /* one sun, one house */
+    for (int i = 0; i < OBJ_MAX && k < 0; ++i) if (!objs[i].active) k = i;
+    if (k < 0) {  /* full: replace the oldest */
+        k = 0;
+        for (int i = 1; i < OBJ_MAX; ++i) if (objs[i].age < objs[k].age) k = i;
+    }
+    wobj_t *o = &objs[k];
+    float cx = (ink_x0 + ink_x1) / 2.0f, cy = (ink_y0 + ink_y1) / 2.0f;
+    int span = (ink_x1 - ink_x0) > (ink_y1 - ink_y0) ? (ink_x1 - ink_x0) : (ink_y1 - ink_y0);
+    if (span < 8) span = 8;
+    int step = (ink_n + OBJ_PTS - 1) / OBJ_PTS, n = 0;
+    if (step < 1) step = 1;
+    for (int i = 0; i < ink_n && n < OBJ_PTS; ++i) {
+        if (ink_x[i] < 0) {  /* keep pen lifts */
+            if (n > 0 && o->px[n - 1] != OBJ_PEN_UP) { o->px[n] = OBJ_PEN_UP; o->py[n] = 0; ++n; }
+            continue;
+        }
+        if (i % step && i + 1 < ink_n && ink_x[i + 1] >= 0) continue;
+        o->px[n] = (int16_t)(ink_x[i] - cx);
+        o->py[n] = (int16_t)(ink_y[i] - cy);
+        ++n;
+    }
+    o->n = n;
+    o->active = 1;
+    o->cls = cls;
+    o->age = ++obj_age;
+    o->x = o->x0 = cx;
+    o->y = o->y0 = cy;
+    o->s = o->s0 = 1.0f;
+    o->x1 = tx;
+    o->s1 = tsize / (float)span;
+    o->y1 = ty;
+    o->t = 0.0f;
+    o->dur = 0.8f;
+    o->life = life;
+    o->bite = 0.0f;
+    return k;
+}
+
+/* Object standing on the floor: its bottom on FLOOR_Y */
+static float floor_y_for(float tsize, int span_h, int span)
+{
+    float h = (float)span_h * tsize / (float)(span < 8 ? 8 : span);
+    return (float)FLOOR_Y - h / 2.0f;
+}
+
+/* Animate objects; 1 if anything moved or vanished */
+static int world_update(float dt)
+{
+    int dirty = 0;
+    for (int k = 0; k < OBJ_MAX; ++k) {
+        wobj_t *o = &objs[k];
+        if (!o->active) continue;
+        if (o->t < o->dur) {
+            o->t += dt;
+            float u = smoothstep(o->t / o->dur);
+            o->x = o->x0 + (o->x1 - o->x0) * u;
+            o->y = o->y0 + (o->y1 - o->y0) * u;
+            o->s = o->s0 + (o->s1 - o->s0) * u;
+            dirty = 1;
+        }
+        if (o->life >= 0.0f) {
+            o->life -= dt;
+            if (o->life < 0.0f) { o->active = 0; dirty = 1; }
+        }
+    }
+    return dirty;
+}
+
+static int world_find(int cls)
+{
+    for (int k = 0; k < OBJ_MAX; ++k) if (objs[k].active && objs[k].cls == cls) return k;
+    return -1;
+}
+
+static void world_clear_all(int cam_mode)
+{
+    for (int k = 0; k < OBJ_MAX; ++k) objs[k].active = 0;
+    ink_clear(cam_mode);
+}
+
+/* Food meter, top-left */
+static void draw_hunger(float hunger)
+{
+    fill_bg(4, 2, 176, 24);
+    draw_text(8, 6, "FOOD", 2, 70, 40, 95);
+    fill_rect(62, 6, 172, 20, 70, 40, 95);
+    fill_rect(64, 8, 170, 18, 255, 255, 255);
+    int fw = (int)(hunger * 106.0f);
+    uint8_t r = (uint8_t)(hunger < 0.5f ? 230 : 230 - (hunger - 0.5f) * 2.0f * 150.0f);
+    uint8_t g = (uint8_t)(hunger < 0.5f ? 60 + hunger * 2.0f * 140.0f : 200);
+    if (fw > 0) fill_rect(64, 8, 64 + fw, 18, r, g, 90);
+}
+
+/* Eraser button, bottom-left */
+static void draw_eraser(int h)
+{
+    fill_rect(0, GRAPH_Y0, ICON_W, h, 120, 80, 200);
+    int cx = ICON_W / 2, cy = GRAPH_Y0 + (h - GRAPH_Y0) / 2;
+    for (int i = 0; i < 18; ++i) {  /* slanted eraser block */
+        fill_rect(cx - 22 + i, cy + 12 - i, cx + 2 + i, cy + 14 - i, 255, 255, 255);
+    }
+    for (int i = 0; i < 8; ++i) fill_rect(cx - 22 + i, cy + 12 - i, cx - 12 + i, cy + 14 - i, 240, 150, 180);
+    fill_rect(cx - 26, cy + 18, cx + 26, cy + 20, 255, 255, 255);
+}
+
 /* ---- mic graph --------------------------------------------------------- */
 
 #define GRAPH_N 80
@@ -770,16 +984,17 @@ static void draw_icon(int cam_mode, int w, int h)
     }
 }
 
-static void draw_graph(int w, int h)
+static void draw_graph(int x0, int x1, int h)
 {
-    fill_rect(0, GRAPH_Y0, w, h, 244, 240, 250);
-    int bw = w / GRAPH_N, gh = h - GRAPH_Y0 - 8;
+    fill_rect(x0, GRAPH_Y0, x1, h, 244, 240, 250);
+    int bw = (x1 - x0) / GRAPH_N, gh = h - GRAPH_Y0 - 8;
+    if (bw < 1) bw = 1;
     for (int i = 0; i < GRAPH_N; ++i) {
         float t = graph_db[i] / 40.0f;
         if (t < 0.0f) t = 0.0f;
         if (t > 1.0f) t = 1.0f;
         int bh = (int)(t * (float)gh);
-        fill_rect(i * bw + 1, h - 4 - bh, i * bw + bw - 1, h - 4, 160, 120, 230);
+        fill_rect(x0 + i * bw + 1, h - 4 - bh, x0 + i * bw + bw - 1, h - 4, 160, 120, 230);
     }
 }
 
@@ -901,6 +1116,10 @@ void bunny_demo_loop(void)
     int tap_candidate = 0, drawing = 0, was_touching = 0, start_x = 0, start_y = 0;
     float ink_idle = 0.0f, bubble_t = 0.0f;
     char bubble_text[24] = "";
+    /* the world */
+    float hunger = 0.8f, hungry_nag = 0.0f;
+    int pending_obj = -1, eat_obj = -1, go_sleep = 0, flee_after = 0;
+    bunny_clip_t pending_clip = CLIP_COUNT;
     int touch_fails = 0, imu_fails = 0;
     uint32_t was_pressed = 0, frame = 0, nn_us_acc = 0;
     rect_t prev = {0, 0, 0, 0}, prev_dot = {0, 0, 0, 0};
@@ -995,6 +1214,15 @@ void bunny_demo_loop(void)
             }
         }
         if (touching && touch_x >= w - ICON_W && touch_y >= GRAPH_Y0) poked = 0;
+        if (poked && touch_x < ICON_W && touch_y >= GRAPH_Y0) {  /* eraser: clear the world */
+            poked = 0;
+            world_clear_all(cam_mode);
+            pending_obj = eat_obj = -1;
+            pending_clip = CLIP_COUNT;
+            go_sleep = flee_after = 0;
+            printf("bunny: world cleared\n");
+        }
+        if (touching && touch_x < ICON_W && touch_y >= GRAPH_Y0) poked = 0;
         /* hit box: the middle of the sprite square, where the bunny is drawn */
         int bxa = (int)(bx + ar_off);
         int on_bunny = touching && touch_x >= bxa + spr / 5 && touch_x < bxa + spr * 4 / 5 &&
@@ -1120,11 +1348,34 @@ void bunny_demo_loop(void)
 
             switch (st) {
             case ST_ACTION:
+                if (eat_obj >= 0 && clip == CLIP_EAT && objs[eat_obj].active) {  /* nibble the fish */
+                    objs[eat_obj].bite += dt / EAT_S;
+                    if (objs[eat_obj].bite >= 1.0f) {
+                        objs[eat_obj].active = 0;
+                        eat_obj = -1;
+                        hunger = hunger + 0.5f > 1.0f ? 1.0f : hunger + 0.5f;
+                        printf("bunny: ate the fish, food %d%%\n", (int)(hunger * 100.0f));
+                        snprintf(bubble_text, sizeof(bubble_text), "YUM!");
+                        if (!cam_mode) fill_bg(0, 24, w, 100);
+                        bubble_t = 1.6f;
+                        state_t_s = action_len;  /* done */
+                    }
+                    world_rebuild(cam_mode, 0, 0, -1, -1);
+                }
                 if (state_t_s > action_len) {
-                    st = ST_IDLE;
-                    set_clip(CLIP_IDLE);
+                    eat_obj = -1;
+                    if (flee_after) {  /* scared of the cat: run to the far side */
+                        int c = world_find(C_CAT);
+                        float cxp = c >= 0 ? objs[c].x : (float)w / 2.0f;
+                        target_x = cxp < (float)w / 2.0f ? x_max : x_min;
+                        flee_after = 0;
+                        st = ST_WANDER;
+                    } else {
+                        st = ST_IDLE;
+                        set_clip(CLIP_IDLE);
+                        next_decision = frand(2.0f, 5.0f);
+                    }
                     state_t_s = 0.0f;
-                    next_decision = frand(2.0f, 5.0f);
                 }
                 break;
             case ST_WANDER: {
@@ -1132,10 +1383,26 @@ void bunny_demo_loop(void)
                 if (target_x < x_min) target_x = x_min;
                 if (target_x > x_max) target_x = x_max;
                 if (fabsf(dist) < 4.0f) {
-                    st = ST_IDLE;
-                    set_clip(CLIP_IDLE);
                     state_t_s = 0.0f;
-                    next_decision = frand(2.0f, 5.0f);
+                    if (pending_obj >= 0 && objs[pending_obj].active && pending_clip != CLIP_COUNT) {
+                        /* arrived at a drawing: eat it / sniff it */
+                        facing_left = objs[pending_obj].x < bx + (float)spr / 2.0f;
+                        st = ST_ACTION;
+                        set_clip(pending_clip);
+                        action_len = pending_clip == CLIP_EAT ? EAT_S + 0.5f : 2.6f;
+                        if (pending_clip == CLIP_EAT) eat_obj = pending_obj;
+                        printf("bunny: reached the %s\n", pending_clip == CLIP_EAT ? "fish" : "flower");
+                        pending_obj = -1;
+                        pending_clip = CLIP_COUNT;
+                    } else if (go_sleep) {  /* home: lie down here */
+                        go_sleep = 0;
+                        st = ST_LIE;
+                        set_clip(CLIP_LIE_DOWN);
+                    } else {
+                        st = ST_IDLE;
+                        set_clip(CLIP_IDLE);
+                        next_decision = frand(2.0f, 5.0f);
+                    }
                 } else {
                     int fast = fabsf(dist) > RUN_IF_FARTHER;
                     set_clip(fast ? CLIP_RUN : CLIP_WALK);
@@ -1148,8 +1415,31 @@ void bunny_demo_loop(void)
             case ST_IDLE:
             default:
                 if (idle_s > SLEEP_AFTER_S) {
-                    st = ST_LIE;
-                    set_clip(CLIP_LIE_DOWN);
+                    int hk = world_find(C_HOUSE);
+                    if (hk >= 0 && !go_sleep && fabsf(objs[hk].x - (bx + (float)spr / 2.0f)) > 50.0f) {
+                        go_sleep = 1;  /* walk home first */
+                        target_x = objs[hk].x - (float)spr / 2.0f + (objs[hk].x < (float)w / 2.0f ? 110.0f : -110.0f);
+                        st = ST_WANDER;
+                    } else {
+                        go_sleep = 0;
+                        st = ST_LIE;
+                        set_clip(CLIP_LIE_DOWN);
+                    }
+                    state_t_s = 0.0f;
+                    int sk = world_find(C_SUN);  /* bedtime: the sun sets */
+                    if (sk >= 0 && objs[sk].life < 0.0f) {
+                        objs[sk].x0 = objs[sk].x; objs[sk].y0 = objs[sk].y; objs[sk].s0 = objs[sk].s;
+                        objs[sk].x1 = objs[sk].x; objs[sk].y1 = (float)FLOOR_Y; objs[sk].s1 = objs[sk].s;
+                        objs[sk].t = 0.0f; objs[sk].dur = 3.0f; objs[sk].life = 3.0f;
+                    }
+                } else if (hunger < HUNGRY_AT && hungry_nag <= 0.0f && bubble_t <= 0.0f) {
+                    hungry_nag = 25.0f;  /* hungry: complain */
+                    snprintf(bubble_text, sizeof(bubble_text), "HUNGRY!");
+                    if (!cam_mode) fill_bg(0, 24, w, 100);
+                    bubble_t = 2.5f;
+                    st = ST_ACTION;
+                    set_clip(CLIP_SAD);
+                    action_len = 3.0f;
                     state_t_s = 0.0f;
                 } else if (state_t_s > next_decision) {
                     float r = frand(0.0f, 1.0f);
@@ -1168,6 +1458,10 @@ void bunny_demo_loop(void)
             }
         }
         perk = loud ? 1.2f : (perk > dt ? perk - dt : 0.0f);
+        if (world_update(dt)) world_rebuild(cam_mode, 0, 0, -1, -1);
+        if (st != ST_SLEEP) hunger -= dt / HUNGER_S;
+        if (hunger < 0.0f) hunger = 0.0f;
+        if (hungry_nag > 0.0f) hungry_nag -= dt;
 
         if (g_test_doodle) {  /* remote test: draw a shape as if by finger */
             int t = g_test_doodle;
@@ -1187,6 +1481,14 @@ void bunny_demo_loop(void)
                 ink_add(cx - 115, cy - 20);
                 ink_add(cx, cy - 130);
                 ink_add(cx + 115, cy - 20);
+            } else if (t == 4) {  /* fish: body ellipse + tail + eye */
+                for (int i = 0; i <= 36; ++i) {
+                    float an = (float)i * 0.17453f;
+                    ink_add(cx + (int)(110.0f * cosf(an)), cy + (int)(55.0f * sinf(an)));
+                }
+                ink_add(-1, -1);
+                ink_add(cx + 105, cy); ink_add(cx + 170, cy - 50); ink_add(cx + 170, cy + 50); ink_add(cx + 105, cy);
+                ink_add(-1, -1); ink_add(cx - 60, cy - 15); ink_add(cx - 58, cy - 12);
             } else {  /* smiley: face circle, two eyes, mouth */
                 for (int i = 0; i <= 40; ++i) {
                     float a = (float)i * 0.15708f;
@@ -1223,16 +1525,70 @@ void bunny_demo_loop(void)
                 } else {
                     snprintf(bubble_text, sizeof(bubble_text), "???");
                 }
-                if (!cam_mode) fill_bg(0, 0, w, 100);
+                if (!cam_mode) fill_bg(0, 24, w, 100);
                 bubble_t = BUBBLE_S;
                 facing_left = (ink_x0 + ink_x1) / 2 < (int)(bx + ar_off) + spr / 2;
-                if (st != ST_LIE && st != ST_SLEEP) {
+                int awake = st != ST_LIE && st != ST_SLEEP;
+                if (awake) {
                     st = ST_ACTION;
                     set_clip(react);
                     action_len = BUBBLE_S;
                     state_t_s = 0.0f;
                 }
                 idle_s = 0.0f;
+                if (pbest >= DOODLE_MIN_P) {
+                    /* the drawing comes to life */
+                    float dcx = (ink_x0 + ink_x1) / 2.0f;
+                    if (dcx < 70.0f) dcx = 70.0f;
+                    if (dcx > (float)w - 70.0f) dcx = (float)w - 70.0f;
+                    int spanw = ink_x1 - ink_x0, spanh = ink_y1 - ink_y0, span = spanw > spanh ? spanw : spanh;
+                    int k = -1;
+                    switch (best) {
+                    case C_FISH:
+                        k = obj_from_ink(C_FISH, dcx, floor_y_for(110.0f, spanh, span), 110.0f, -1.0f);
+                        if (awake) {  /* go and eat it */
+                            pending_obj = k;
+                            pending_clip = CLIP_EAT;
+                            target_x = dcx - (float)spr / 2.0f + (dcx < bx + (float)spr / 2.0f ? 120.0f : -120.0f);
+                            st = ST_WANDER;
+                        }
+                        break;
+                    case C_FLOWER:
+                        k = obj_from_ink(C_FLOWER, dcx, floor_y_for(120.0f, spanh, span), 120.0f, -1.0f);
+                        if (awake) {  /* go and sniff it */
+                            pending_obj = k;
+                            pending_clip = CLIP_LOVE;
+                            target_x = dcx - (float)spr / 2.0f + (dcx < bx + (float)spr / 2.0f ? 120.0f : -120.0f);
+                            st = ST_WANDER;
+                        }
+                        break;
+                    case C_HOUSE:
+                        k = obj_from_ink(C_HOUSE, dcx, floor_y_for(160.0f, spanh, span), 160.0f, -1.0f);
+                        break;
+                    case C_CAT:
+                        k = obj_from_ink(C_CAT, dcx, floor_y_for(110.0f, spanh, span), 110.0f, 8.0f);
+                        if (awake) {
+                            action_len = 1.3f;  /* startled, then runs away */
+                            flee_after = 1;
+                        }
+                        break;
+                    case C_SUN:
+                        k = obj_from_ink(C_SUN, 80.0f, 150.0f, 90.0f, -1.0f);
+                        break;
+                    case C_STAR:
+                        k = obj_from_ink(C_STAR, frand(200.0f, (float)w - 60.0f), frand(130.0f, 200.0f), 70.0f, -1.0f);
+                        break;
+                    case C_LIGHTNING:
+                        k = obj_from_ink(C_LIGHTNING, (ink_x0 + ink_x1) / 2.0f, (ink_y0 + ink_y1) / 2.0f, (float)span * 0.8f, 1.8f);
+                        break;
+                    case C_SMILEY:
+                    default:
+                        k = obj_from_ink(C_SMILEY, (ink_x0 + ink_x1) / 2.0f, (ink_y0 + ink_y1) / 2.0f - 60.0f, (float)span * 0.8f, 3.5f);
+                        break;
+                    }
+                    (void)k;
+                    ink_clear(cam_mode);  /* the strokes now live in the object */
+                }
             } else {
                 printf("doodle: classify failed (%d)\n", nd);
                 ink_clear(cam_mode);
@@ -1241,9 +1597,9 @@ void bunny_demo_loop(void)
         }
         if (bubble_t > 0.0f) {
             bubble_t -= dt;
-            if (bubble_t <= 0.0f) {  /* bubble and drawing go away */
-                ink_clear(cam_mode);
-                if (!cam_mode) fill_rect(0, 0, w, 100, 255, 255, 255);
+            if (bubble_t <= 0.0f) {  /* bubble (and an unrecognised drawing) go away */
+                if (ink_n > 0) ink_clear(cam_mode);
+                if (!cam_mode) fill_bg(0, 24, w, 100);
                 prev = (rect_t){0, 0, 0, 0};
             }
         }
@@ -1323,8 +1679,10 @@ void bunny_demo_loop(void)
             fill_circle(touch_x, touch_y, 6, 120, 80, 200);
             prev_dot = (rect_t){touch_x - 7, touch_y - 7, touch_x + 8, touch_y + 8};
         }
-        draw_graph(w - ICON_W, h);
+        draw_graph(ICON_W, w - ICON_W, h);
         draw_icon(cam_mode, w, h);
+        draw_eraser(h);
+        draw_hunger(hunger);
         display_flush();
         if (wdt_rc == ARM_DRIVER_OK) Driver_WDT0.Feed();
         us_draw = us_since(st3);
@@ -1335,7 +1693,8 @@ void bunny_demo_loop(void)
         }
 
         /* LEDs follow the mood */
-        if (clip == CLIP_LOVE) leds_rgb(1, 0, 1);
+        if (world_find(C_LIGHTNING) >= 0) leds_rgb((frame >> 1) & 1, (frame >> 1) & 1, (frame >> 1) & 1);
+        else if (clip == CLIP_LOVE) leds_rgb(1, 0, 1);
         else if (clip == CLIP_SHAKE || clip == CLIP_DIZZY) leds_rgb(1, 1, 0);
         else if (clip == CLIP_ANGRY) leds_rgb(1, 0, 0);
         else if (clip == CLIP_HOP || clip == CLIP_CLAP) leds_rgb(0, 1, 0);

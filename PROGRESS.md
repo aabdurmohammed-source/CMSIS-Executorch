@@ -181,3 +181,18 @@ Branch `bunny` (from working-checkpoint 432c0e53). Kit + data in model/bunny/ (t
 ## Back to 96x96 + bold lines (Sat Oct 17, late night)
 - Shipped model: DecoderV2 96x96 (Abdul's choice), re-exported with the SRAM-only Vela config and run from an SRAM copy: **9.4 ms/frame** (was 10.6 ms from MRAM), loop 18 fps. APP_MODEL_SRAM_SIZE 0x1A0000, APP_TEMP_POOL_SIZE 0x1C0000 (128x128 values in the clayer comments; 128x128 still works by re-exporting with BUNNY_SIZE=128 and restoring those sizes).
 - Bold lines (bunny_demo.c convert_output): after the NN, pixels with luminance < 150 are pushed toward a deep purple (LINE_DARKEN 0.75) and dark pixels darken their 4 neighbours (LINE_THICKEN 0.65) -> outline/eyes/mouth darker and ~1 px thicker at 96 px (~4-5 px on screen). Tunable #defines.
+
+## The bunny's world: drawings come to life (Sat Oct 17, late night)
+- A recognised drawing becomes a world object made of its own strokes (bunny_demo.c, "the bunny's world"): it shrinks and moves into place over 0.8 s, kept in the ink mask (no flicker). Up to 4 objects (oldest replaced; one sun, one house).
+  - fish -> drops to the floor; bunny walks over and eats it bite by bite (2.8 s), "YUM!", food +50%
+  - flower -> planted on the floor; bunny walks over and sniffs it (love + hearts)
+  - house -> stands on the floor; when sleepy (20 s idle) the bunny walks home and lies down next to it
+  - sun -> floats to the top-left sky; sets (slides down, vanishes) at bedtime
+  - star -> floats into the sky (clap)
+  - cat -> on the floor for 8 s; bunny startled (shake) then runs to the far side
+  - lightning -> stays 1.8 s, LEDs flicker white, bunny angry
+  - smiley -> floats up, fades after 3.5 s, bunny waves
+  - unsure -> "???", confused, drawing fades
+- Feeding mini-game: food meter top-left drains over 3 min (not while asleep); below 30% the bunny says "HUNGRY!" and looks sad every 25 s; fish refills.
+- Eraser button bottom-left clears all drawings/objects (mic graph now sits between the two buttons).
+- Tested remotely: house 97% (hop, on floor), star 98% (clap, in sky), fish 99% -> "reached the fish" -> eat -> "ate the fish, food 100%". Loop 18-20 fps, NN 9.5 ms. Remote test hook g_test_doodle: 1 star, 2 house, 3 smiley, 4 fish.
