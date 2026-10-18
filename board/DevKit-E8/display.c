@@ -8,6 +8,7 @@
 
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "RTE_Components.h"
 #include CMSIS_device_header
@@ -47,6 +48,10 @@
 
 /* .bss.ai_pool is routed to the bulk SRAM by the linker scripts of this layer */
 static uint8_t lcd_image[LCD_H][LCD_W][PIXEL_BYTES] __attribute__((section(".bss.ai_pool"), aligned(32)));
+/* Second frame buffer for double buffering (display_enable_double_buffer) */
+static uint8_t lcd_image2[LCD_H][LCD_W][PIXEL_BYTES] __attribute__((section(".bss.ai_pool"), aligned(32)));
+static uint8_t *fb_front = &lcd_image[0][0][0], *fb_back = &lcd_image[0][0][0];
+static int fb_double;
 
 extern ARM_DRIVER_CDC200 Driver_CDC200;
 extern ARM_DRIVER_MIPI_DSI Driver_MIPI_DSI;
@@ -145,7 +150,15 @@ int display_init(void)
 
 uint8_t *display_buffer(void)
 {
-    return &lcd_image[0][0][0];
+    return fb_back;  /* = the shown buffer unless double buffering is on */
+}
+
+void display_enable_double_buffer(void)
+{
+    memcpy(lcd_image2, lcd_image, sizeof(lcd_image2));
+    fb_front = &lcd_image[0][0][0];
+    fb_back = &lcd_image2[0][0][0];
+    fb_double = 1;
 }
 
 int display_width(void)
@@ -165,5 +178,15 @@ int display_bytes_per_pixel(void)
 
 void display_flush(void)
 {
-    SCB_CleanDCache_by_Addr((uint32_t *)lcd_image, (int32_t)sizeof(lcd_image));
+    SCB_CleanDCache_by_Addr((uint32_t *)fb_back, (int32_t)sizeof(lcd_image));
+    if (!fb_double) return;
+    /* Show the finished frame from the next vertical blank, and wait until the
+     * controller has switched (it clears the reload request) before the old
+     * front buffer is drawn into: no torn or half-drawn frames on screen. */
+    Driver_CDC200.Control(CDC200_FRAMEBUF_UPDATE_VSYNC, (uint32_t)fb_back);
+    uint32_t t0 = DWT->CYCCNT, limit = SystemCoreClock / 20U;  /* 50 ms */
+    while ((CDC->CDC_LAYER_CFG[0].CDC_L_REL_CTRL & (1UL << 1)) && (DWT->CYCCNT - t0) < limit) {}
+    uint8_t *t = fb_front;
+    fb_front = fb_back;
+    fb_back = t;
 }

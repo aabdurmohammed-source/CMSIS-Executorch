@@ -638,8 +638,11 @@ static int ink_n;
 static int ink_x0 = 9999, ink_y0 = 9999, ink_x1 = -1, ink_y1 = -1;  /* bounding box */
 
 /* Thick segment into the ink mask only */
+static int g_dbuf;  /* double buffered: every frame is redrawn, no ink mask needed */
+
 static void mask_seg(int x0, int y0, int x1, int y1, int thick)
 {
+    if (g_dbuf) return;
     int n = abs(x1 - x0) > abs(y1 - y0) ? abs(x1 - x0) : abs(y1 - y0);
     if (n < 1) n = 1;
     int r = thick / 2;
@@ -662,19 +665,8 @@ static void ink_stamp(int x0, int y0, int x1, int y1)
 {
     int n = abs(x1 - x0) > abs(y1 - y0) ? abs(x1 - x0) : abs(y1 - y0);
     if (n < 1) n = 1;
-    int r = INK_THICK / 2;
-    for (int k = 0; k <= n; ++k) {
-        int cx = x0 + (x1 - x0) * k / n, cy = y0 + (y1 - y0) * k / n;
-        for (int dy = -r; dy <= r; ++dy) {
-            for (int dx = -r; dx <= r; ++dx) {
-                int x = cx + dx, y = cy + dy;
-                if (dx * dx + dy * dy > r * r + 1 || x < 0 || x >= INK_W || y < 0 || y >= INK_H) continue;
-                int i = y * INK_W + x;
-                ink_mask[i >> 3] |= (uint8_t)(1u << (i & 7));
-            }
-        }
-    }
-    ink_any = 1;
+    (void)n;
+    mask_seg(x0, y0, x1, y1, INK_THICK);
     thick_line(x0, y0, x1, y1, INK_THICK, INK_R, INK_G, INK_B);
 }
 
@@ -846,7 +838,33 @@ static void world_rebuild(int cam_mode, int ex0, int ey0, int ex1, int ey1)
         }
     }
 #undef GROW
-    if (!cam_mode && ux1 > ux0) fill_bg(ux0, uy0, ux1, uy1);
+    if (!cam_mode && !g_dbuf && ux1 > ux0) fill_bg(ux0, uy0, ux1, uy1);
+}
+
+/* Double buffering: the live drawing and the world objects as plain lines
+ * (no background), drawn every frame */
+static void world_draw(void)
+{
+    for (int i = 1; i < ink_n; ++i) {
+        if (ink_x[i] < 0 || ink_x[i - 1] < 0) continue;
+        thick_line(ink_x[i - 1], ink_y[i - 1], ink_x[i], ink_y[i], INK_THICK, INK_R, INK_G, INK_B);
+    }
+    for (int k = 0; k < OBJ_MAX; ++k) {
+        wobj_t *o = &objs[k];
+        if (!o->active) continue;
+        int upto = o->n - (int)(o->bite * (float)o->n);
+        for (int i = 1; i < upto; ++i) {
+            if (o->px[i] == OBJ_PEN_UP || o->px[i - 1] == OBJ_PEN_UP) continue;
+            thick_line((int)(o->x + o->px[i - 1] * o->s), (int)(o->y + o->py[i - 1] * o->s),
+                       (int)(o->x + o->px[i] * o->s), (int)(o->y + o->py[i] * o->s), OBJ_THICK, INK_R, INK_G, INK_B);
+        }
+    }
+}
+
+/* White background above the graph strip, fast (white = 0xFF in every byte) */
+static void clear_world(int w)
+{
+    memset(display_buffer(), 0xFF, (size_t)w * (size_t)GRAPH_Y0 * (size_t)display_bytes_per_pixel());
 }
 
 /* Turn the live drawing into an object of class cls that moves to (tx, ty)
@@ -1074,6 +1092,8 @@ void bunny_demo_loop(void)
         }
     }
     bunny_boot_led(0, 1, 0);  /* green: display up */
+    display_enable_double_buffer();
+    g_dbuf = 1;
 
     int w = display_width(), h = display_height();
     fill_rect(0, 0, w, h, 255, 255, 255);
@@ -1660,17 +1680,19 @@ void bunny_demo_loop(void)
         int ox = (int)(bx + ar_off) + (int)(shown.dx * k);
         int oy = GROUND_Y - spr + (int)(shown.dy * k);
         rect_t cur = {ox, oy, ox + spr, oy + spr};
+        /* Every frame is drawn whole into the hidden buffer, then swapped in:
+         * background, drawings (lines only), the bunny with its white see-through */
         if (cam_mode) {
             /* the frame started last loop; wait up to 40 ms for it, then start the next */
             uint32_t cw0 = DWT->CYCCNT;
             while (!camera_capture_poll() && us_since(cw0) < 40000u) {}
-            draw_camera_bg(w, GRAPH_Y0, ox, oy, facing_left);  /* camera + bunny, row by row */
+            draw_camera_bg(w, GRAPH_Y0, -10000, 0, 0);  /* camera only */
             camera_capture_start();
         } else {
-            fill_rect(prev_dot.x0, prev_dot.y0, prev_dot.x1, prev_dot.y1, 255, 255, 255);
-            clear_uncovered(prev, cur);
-            draw_sprite(ox, oy, facing_left, 0);
+            clear_world(w);
         }
+        world_draw();
+        draw_sprite(ox, oy, facing_left, 1);
         draw_effects(&shown, ox, oy, facing_left);
         if (bubble_t > 0.0f) draw_bubble(bubble_text, w);
         prev = cur;

@@ -196,3 +196,9 @@ Branch `bunny` (from working-checkpoint 432c0e53). Kit + data in model/bunny/ (t
 - Feeding mini-game: food meter top-left drains over 3 min (not while asleep); below 30% the bunny says "HUNGRY!" and looks sad every 25 s; fish refills.
 - Eraser button bottom-left clears all drawings/objects (mic graph now sits between the two buttons).
 - Tested remotely: house 97% (hop, on floor), star 98% (clap, in sky), fish 99% -> "reached the fish" -> eat -> "ate the fish, food 100%". Loop 18-20 fps, NN 9.5 ms. Remote test hook g_test_doodle: 1 star, 2 house, 3 smiley, 4 fish.
+
+## Glitch fix: double buffering (Sat Oct 17, late night)
+- Bugs (Abdul): bunny whiting out / half-drawn mid-move, drawings with white boxes around them glitching against the bunny, flickering zzz. Cause: everything was drawn straight into the shown frame buffer (white-clear then redraw, sprite with a white square, white boxes to erase moving objects).
+- Fix: display.c double buffering (display_enable_double_buffer): a second 1.1 MB frame buffer; display_flush() cleans the cache, requests CDC200_FRAMEBUF_UPDATE_VSYNC and waits for the CDC to clear the layer reload bit (switch done at vertical blank) before swapping. The face demo stays single-buffered.
+- bunny_demo.c now redraws each frame whole into the hidden buffer: fast white clear (memset) or camera background -> drawings and world objects as plain lines (world_draw) -> bunny with white see-through (keyed sprite) -> effects (zzz, hearts) -> bubble, food meter, graph, buttons -> swap. The ink mask / white-box clearing is off in this mode.
+- Result: no tearing or white flashes, drawings have no background, clean zzz; 20 fps (was 18). SRAM: + 1.1 MB (both frame buffers fit with the 96x96 model).
