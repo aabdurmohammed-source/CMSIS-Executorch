@@ -357,6 +357,7 @@ __attribute__((naked)) void HardFault_Handler(void)
 #define MAX_SPR 480
 
 static uint8_t  src_rgb[MAX_NN * MAX_NN * 3];
+static uint8_t  src_a[MAX_NN * MAX_NN];   /* alpha: 0 background, 255 bunny, in between at the edge */
 static uint16_t tab_i0[MAX_SPR];
 static uint16_t tab_w[MAX_SPR];  /* weight of the second sample, 0..256 */
 static int      nn_side, spr;
@@ -384,6 +385,56 @@ static void build_tables(void)
 #define LINE_R 24
 #define LINE_G 10
 #define LINE_B 36
+
+/* Alpha matte (like a PNG): the background is the near-white area connected to
+ * the image border (flood fill), so the white belly and eye highlights stay
+ * solid. Pixels touching the background are the anti-aliased edge: they get
+ * partial alpha and the white is taken out of their colour, so the outline
+ * blends into the camera / drawings without a white halo. */
+#define BG_MIN_CHANNEL  222     /* near-white: every channel at least this */
+#define EDGE_DARK       60.0f   /* outline darkness used to estimate edge alpha */
+
+static void make_alpha(void)
+{
+    static uint16_t stack[MAX_NN * MAX_NN];
+    int s = nn_side, n = s * s, sp = 0;
+    memset(src_a, 255, (size_t)n);
+#define NEAR_WHITE(i) (src_rgb[(i) * 3] >= BG_MIN_CHANNEL && src_rgb[(i) * 3 + 1] >= BG_MIN_CHANNEL && src_rgb[(i) * 3 + 2] >= BG_MIN_CHANNEL)
+    for (int i = 0; i < s; ++i) {  /* seed with the border */
+        int e[4] = {i, (s - 1) * s + i, i * s, i * s + s - 1};
+        for (int k = 0; k < 4; ++k) {
+            if (src_a[e[k]] && NEAR_WHITE(e[k])) { src_a[e[k]] = 0; stack[sp++] = (uint16_t)e[k]; }
+        }
+    }
+    while (sp > 0) {
+        int i = stack[--sp], x = i % s, y = i / s;
+        int nb[4] = {x > 0 ? i - 1 : -1, x < s - 1 ? i + 1 : -1, y > 0 ? i - s : -1, y < s - 1 ? i + s : -1};
+        for (int k = 0; k < 4; ++k) {
+            int j = nb[k];
+            if (j >= 0 && src_a[j] && NEAR_WHITE(j)) { src_a[j] = 0; stack[sp++] = (uint16_t)j; }
+        }
+    }
+#undef NEAR_WHITE
+    for (int i = 0; i < n; ++i) {
+        uint8_t *c = &src_rgb[i * 3];
+        if (src_a[i] == 0) {  /* background: dark, so bilinear mixing never brings in white */
+            c[0] = LINE_R; c[1] = LINE_G; c[2] = LINE_B;
+            continue;
+        }
+        int x = i % s, y = i / s;
+        int edge = (x > 0 && !src_a[i - 1]) || (x < s - 1 && !src_a[i + 1]) || (y > 0 && !src_a[i - s]) || (y < s - 1 && !src_a[i + s]);
+        if (!edge) continue;
+        int mn = c[0] < c[1] ? (c[0] < c[2] ? c[0] : c[2]) : (c[1] < c[2] ? c[1] : c[2]);
+        float a = (255.0f - (float)mn) / (255.0f - EDGE_DARK);
+        if (a > 1.0f) a = 1.0f;
+        if (a < 0.05f) a = 0.05f;
+        for (int k = 0; k < 3; ++k) {  /* un-mix the white: colour = (pixel - (1-a) * 255) / a */
+            float v = ((float)c[k] - (1.0f - a) * 255.0f) / a;
+            c[k] = (uint8_t)(v < 0.0f ? 0.0f : (v > 255.0f ? 255.0f : v));
+        }
+        src_a[i] = (uint8_t)(a * 255.0f);
+    }
+}
 
 static void convert_output(const float *out)
 {
@@ -416,6 +467,7 @@ static void convert_output(const float *out)
             p[2] = (uint8_t)(p[2] + (LINE_B - p[2]) * k);
         }
     }
+    make_alpha();
 }
 
 /* Bilinear scale src_rgb to spr x spr at (ox, oy), mirrored if flip */
@@ -475,6 +527,14 @@ static void draw_sprite_row(int ox, int oy, int flip, int key, int y)
     for (int k = 0; k < nn_side * 3; ++k) {
         vrow[k] = (uint8_t)((r0[k] * wy0 + r1[k] * wy) >> 8);
     }
+    static uint8_t arow[MAX_NN];
+    const uint8_t *a0 = src_a + (size_t)tab_i0[y] * nn_side, *a1 = a0 + nn_side;
+    int any = 0;
+    for (int k = 0; k < nn_side; ++k) {
+        arow[k] = (uint8_t)((a0[k] * wy0 + a1[k] * wy) >> 8);
+        any |= arow[k];
+    }
+    if (key && !any) return;  /* a fully transparent row */
     uint8_t *row = fb + (size_t)sy * (size_t)w * (size_t)bpp;
     for (int x = x_lo; x < x_hi; ++x) {
         int src_x = flip ? spr - 1 - x : x;
@@ -483,12 +543,21 @@ static void draw_sprite_row(int ox, int oy, int flip, int key, int y)
         uint8_t r = (uint8_t)((v[0] * wx0 + v[3] * wx) >> 8);
         uint8_t g = (uint8_t)((v[1] * wx0 + v[4] * wx) >> 8);
         uint8_t b = (uint8_t)((v[2] * wx0 + v[5] * wx) >> 8);
-        if (r > KEY_WHITE && g > KEY_WHITE && b > KEY_WHITE) {
-            if (key) continue;  /* see-through over the camera */
-            if (ink_at(ox + x, sy)) {  /* the drawing shows through the white */
-                write_px(row + (size_t)(ox + x) * (size_t)bpp, bpp, INK_R, INK_G, INK_B);
-                continue;
+        if (key) {  /* alpha blend over what is already there (camera, drawings, white) */
+            uint32_t al = (uint32_t)((arow[tab_i0[src_x]] * wx0 + arow[tab_i0[src_x] + 1] * wx) >> 8);
+            if (al < 8) continue;
+            uint8_t *d = row + (size_t)(ox + x) * (size_t)bpp;
+            if (al < 248 && bpp >= 3) {  /* panel bytes are B, G, R */
+                r = (uint8_t)(d[2] + (((int)r - d[2]) * (int)al >> 8));
+                g = (uint8_t)(d[1] + (((int)g - d[1]) * (int)al >> 8));
+                b = (uint8_t)(d[0] + (((int)b - d[0]) * (int)al >> 8));
             }
+            write_px(d, bpp, r, g, b);
+            continue;
+        }
+        if (r > KEY_WHITE && g > KEY_WHITE && b > KEY_WHITE && ink_at(ox + x, sy)) {  /* the drawing shows through the white */
+            write_px(row + (size_t)(ox + x) * (size_t)bpp, bpp, INK_R, INK_G, INK_B);
+            continue;
         }
         write_px(row + (size_t)(ox + x) * (size_t)bpp, bpp, r, g, b);
     }
