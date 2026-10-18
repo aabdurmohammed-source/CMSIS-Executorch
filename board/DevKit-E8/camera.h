@@ -22,6 +22,9 @@ int camera_capture_start(void);
 int camera_capture_poll(void);
 void camera_capture_abort(void);
 
+/* Full power-down and re-init of the CPI and the sensor. 0 on success. */
+int camera_restart(void);
+
 /* RGB565 frame, width x height pixels, 2 bytes each */
 const uint8_t *camera_frame(void);
 int camera_width(void);

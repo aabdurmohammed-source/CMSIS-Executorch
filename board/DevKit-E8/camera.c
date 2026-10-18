@@ -116,6 +116,16 @@ void camera_capture_abort(void)
     cam_busy = 0;
 }
 
+/* Power the CPI + sensor down and bring them up again (the sensor sometimes
+ * stops streaming after a warm reset: frames "arrive" but stay all zeros) */
+int camera_restart(void)
+{
+    camera_capture_abort();
+    Driver_CPI.PowerControl(ARM_POWER_OFF);
+    Driver_CPI.Uninitialize();
+    return camera_init();
+}
+
 uint32_t camera_last_events(void)
 {
     return cam_events;

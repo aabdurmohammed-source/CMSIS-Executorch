@@ -252,3 +252,5 @@ Branch `bunny` (from working-checkpoint 432c0e53). Kit + data in model/bunny/ (t
 - Camera back after Abdul's check; shoulder ride works (Abdul), voice tested by Abdul + teammate: works.
 - Camera colour final: per-channel LUTs = auto gain x light grey-world white balance (CAM_WB 0.25; 0.6 over-corrected the yellow room to green-grey) x gamma 0.85, saturation 1.8x. Screenshot: warm, colourful, face box locked. 15 fps.
 - Gotcha: regenerate J-Link scripts that write globals (cw.jlink etc.) after every build; addresses shift.
+- Face box (debug) off for the demo (FACE_BOX 0).
+- Camera sensor sometimes stops streaming after J-Link warm resets (frames all exactly zero; USB power cycle fixes it). Added recovery: > 15 exactly-black frames in the camera world -> camera_restart() (CPI power off + Uninitialize + camera_init, watchdog fed around it), at most twice per boot. Not yet seen triggering (next boot streamed fine); a real power-on boot is what the demo uses anyway.

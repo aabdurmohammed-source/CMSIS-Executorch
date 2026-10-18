@@ -603,6 +603,7 @@ static void draw_sprite(int ox, int oy, int flip, int key)
 #define CAM_TARGET_Y    105     /* average brightness to aim for        */
 #define CAM_MAX_GAIN    3.0f
 #define CAM_GAMMA       0.85f   /* < 1 lifts the shadows                */
+static int cam_black_frames;  /* camera frames in a row that were exactly black (sensor not streaming) */
 #define CAM_WB          0.25f   /* white balance: 0 off, 1 full grey-world (removes the room light's tint) */
 
 static void draw_camera_bg(int w, int y1, int sox, int soy, int sflip)
@@ -628,6 +629,7 @@ static void draw_camera_bg(int w, int y1, int sox, int soy, int sflip)
                 lut[c][v] = (uint8_t)(o > 255.0f ? 255.0f : o);
             }
         }
+        cam_black_frames = ysum == 0 ? cam_black_frames + 1 : 0;
         ysum = yn = 0;
         csum[0] = csum[1] = csum[2] = 0;
     } else if (!ready) {
@@ -1136,7 +1138,7 @@ extern int face_detect(const float **out);
 #define FACE_EVERY      2       /* run the detector every Nth camera frame  */
 #define FACE_STABLE_S   1.0f    /* face seen this long -> jump on the shoulder */
 #define FACE_LOST_S     2.0f    /* face gone this long -> hop back down     */
-#define FACE_BOX        1       /* draw a thin box around the face (debug)  */
+#define FACE_BOX        0       /* draw a thin box around the face (debug)  */
 #define CROP_X0         80      /* centre 480x480 square of the 640x480 frame */
 #define CROP_SIZE       480
 
@@ -1450,6 +1452,7 @@ void bunny_demo_loop(void)
     float jump_x0 = 0.0f, jump_y0 = 0.0f;
     int ride = 0;          /* 0 on the floor, 1 jumping up, 2 riding, 3 hopping down */
     int vstate = 0;        /* voice: 0 off, 1 listening */
+    int cam_restarts = 0;  /* camera restarts done (black-frame recovery) */
     float vrec_t = 0.0f, ride_block_s = 0.0f;
     int voice_act = -1;    /* heard: a KWS_ word */
     int voice_jump = 0;    /* "up" / "down" in the camera world: onto / off the shoulder */
@@ -2309,6 +2312,14 @@ void bunny_demo_loop(void)
                 uint32_t fc0 = DWT->CYCCNT;
                 if (face_detect(&fo) == 0) face = face_decode(fo, w, GRAPH_Y0);
                 face_us = us_since(fc0);
+            }
+            if (cam_black_frames > 15 && cam_restarts < 2) {  /* ~1.5 s of nothing: restart the camera (twice at most) */
+                if (wdt_rc == ARM_DRIVER_OK) Driver_WDT0.Feed();
+                int cr = camera_restart();
+                if (wdt_rc == ARM_DRIVER_OK) Driver_WDT0.Feed();
+                printf("camera: no picture, restarted -> %d\n", cr);
+                ++cam_restarts;
+                cam_black_frames = 0;
             }
             camera_capture_start();
             if (FACE_BOX && fs.ok) {
