@@ -147,7 +147,7 @@ cycle counter (DWT). Model timings are averages printed at boot (`bench:`,
 | Keyword spotter on the U85 | **0.65 ms** |
 | Doodle classifier on the U85 | **0.23 ms** |
 | Voice command end to end after the 2 s recording (endpointing + log-mel on the CPU + NPU) | ~29 ms |
-| Voice command, from releasing the word to the bunny reacting | < 1.6 s (dominated by the fixed 2 s recording window) |
+| Voice command, from pressing push-to-talk to the bunny reacting | ~2 s (the fixed recording window; compute after it is ~29 ms) |
 | Frame rate, home world (NN every frame) | **20 fps** |
 | Frame rate, camera world (camera + colour correction + face detection) | **12-15 fps** |
 
