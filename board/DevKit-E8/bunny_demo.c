@@ -74,7 +74,7 @@ extern int nn_forward(const float *in, int n_in, const float **out, int *n_out);
 #define IMU_SHAKE_TH    150.0f  /* IMU motion that counts as a shake          */
 #define LOUD_DB         30.0f   /* mic level (dB of RMS) that makes ears perk */
 #define SPRITE_PX       448     /* sprite size on screen (64 -> 448, 48 -> 432) */
-#define EDGE_FRAC       0.22f   /* how far the (mostly empty) sprite square may leave the screen */
+#define EDGE_FRAC       0.15f   /* how far the (mostly empty) sprite square may leave the screen */
 #define RELEASE_S       0.15f   /* no finger this long = lifted (GT911 sends gaps) */
 #define COLD_START_MS   1000    /* let the panel power up before the display init */
 #define GROUND_Y        690     /* sprite bottom on screen                    */
@@ -381,7 +381,7 @@ static void build_tables(void)
 #define LINE_LUM_DARK   60.0f   /* luminance treated as fully "line"            */
 #define LINE_LUM_LIGHT  150.0f  /* luminance above this is not line at all      */
 #define LINE_DARKEN     0.88f   /* 0..1: how far line pixels move to LINE_RGB   */
-#define LINE_THICKEN    0.65f   /* 0..1: how much a dark neighbour darkens a pixel */
+#define LINE_THICKEN    0.4f   /* 0..1: how much a dark neighbour darkens a pixel */
 #define LINE_R 24
 #define LINE_G 10
 #define LINE_B 36
@@ -447,6 +447,7 @@ static void convert_output(const float *out)
         }
         float lum = 0.30f * src_rgb[i * 3] + 0.59f * src_rgb[i * 3 + 1] + 0.11f * src_rgb[i * 3 + 2];
         float d = (LINE_LUM_LIGHT - lum) / (LINE_LUM_LIGHT - LINE_LUM_DARK);
+        if (src_rgb[i * 3] > src_rgb[i * 3 + 2] + 12) d = 0.0f;  /* reddish (mouth inside, tongue): not a line */
         dark[i] = d < 0.0f ? 0.0f : (d > 1.0f ? 1.0f : d);
     }
     for (int y = 0; y < s; ++y) {
@@ -2014,6 +2015,8 @@ void bunny_demo_loop(void)
             float valence = clamp01(0.4f * affection + 0.35f * fun + 0.25f * hunger);
             float happy = clamp01((valence - 0.65f) * 3.0f) * 0.35f, sad = clamp01((0.35f - valence) * 3.0f) * 0.4f;
             float sleepy = clamp01((0.3f - energy) * 3.0f) * 0.45f;
+            float tot = happy + sad + sleepy;
+            if (tot > 0.6f) { happy *= 0.6f / tot; sad *= 0.6f / tot; sleepy *= 0.6f / tot; }  /* never more than 60% */
             for (int i = D_EYE_OPEN; i <= D_EYE_SAD; ++i) target.d[i] *= 1.0f - happy - sad - sleepy;
             target.d[D_EYE_HAPPY] += happy;
             target.d[D_EYE_SAD] += sad;
@@ -2046,6 +2049,23 @@ void bunny_demo_loop(void)
         shown.zzz = target.zzz;
         shown.sweat = target.sweat;
         shown.hearts = target.hearts;
+
+        /* ---- keep the dials in the space the model was trained on ---- */
+        {
+            float se = 0.0f, sm = 0.0f;
+            for (int i = D_EYE_OPEN; i <= D_EYE_SAD; ++i) { if (shown.d[i] < 0.0f) shown.d[i] = 0.0f; se += shown.d[i]; }
+            for (int i = D_MOUTH_SMILE; i <= D_MOUTH_YAWN; ++i) { if (shown.d[i] < 0.0f) shown.d[i] = 0.0f; sm += shown.d[i]; }
+            if (se < 1e-3f) { shown.d[D_EYE_OPEN] = 1.0f; se = 1.0f; }
+            if (sm < 1e-3f) { shown.d[D_MOUTH_SMILE] = 1.0f; sm = 1.0f; }
+            for (int i = D_EYE_OPEN; i <= D_EYE_SAD; ++i) shown.d[i] /= se;
+            for (int i = D_MOUTH_SMILE; i <= D_MOUTH_YAWN; ++i) shown.d[i] /= sm;
+            for (int i = D_EAR_L; i < BUNNY_NDIAL; ++i) {
+                float lo, hi;
+                bunny_dial_range(i, &lo, &hi);
+                if (shown.d[i] < lo) shown.d[i] = lo;
+                if (shown.d[i] > hi) shown.d[i] = hi;
+            }
+        }
 
         /* ---- NN: the Ethos-U85 draws the bunny ---- */
         bunny_normalize(shown.d, nn_in);
