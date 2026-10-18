@@ -995,7 +995,14 @@ extern int face_detect(const float **out);
 #define CROP_X0         80      /* centre 480x480 square of the 640x480 frame */
 #define CROP_SIZE       480
 
-typedef struct { int ok; float x, y, w, h, score; } face_t;
+/* BlazeFace keypoints: 0 right eye, 1 left eye, 2 nose, 3 mouth, 4 right ear, 5 left ear
+ * ("right/left" of the person; on screen the person's right eye is on the left) */
+typedef struct { int ok; float x, y, w, h, score; float kx[6], ky[6]; float roll; } face_t;
+
+#define SHOULDER_DX     0.95f   /* shoulder: face widths out from the face centre  */
+#define SHOULDER_DY     1.05f   /*           face heights down                     */
+#define FACE_JUMP_MAX   1.5f    /* a jump of more than this (face widths) between
+                                 * detections is a glitch unless it repeats        */
 
 /* Camera crop -> the detector's 3x128x128 input (-1..1) */
 static void face_fill_input(void)
@@ -1020,7 +1027,8 @@ static void face_fill_input(void)
  * centre-cropped to the screen width over y 0..y1) */
 static face_t face_decode(const float *raw, int w, int y1)
 {
-    face_t f = {0, 0, 0, 0, 0, 0};
+    face_t f;
+    memset(&f, 0, sizeof(f));
     int best = -1;
     float bs = FACE_MIN_SCORE;
     for (int a = 0; a < FACE_N_ANCHORS; ++a) {
@@ -1034,7 +1042,7 @@ static face_t face_decode(const float *raw, int w, int y1)
     const float *bb = &raw[best * 17];
     float bx = bb[0] / 128.0f * face_anchors[best][2] + face_anchors[best][0];
     float by = bb[1] / 128.0f * face_anchors[best][3] + face_anchors[best][1];
-    float wsum = 0.0f, cx = 0.0f, cy = 0.0f, ww = 0.0f, hh = 0.0f;
+    float wsum = 0.0f, cx = 0.0f, cy = 0.0f, ww = 0.0f, hh = 0.0f, kx[6] = {0}, ky[6] = {0};
     for (int a = 0; a < FACE_N_ANCHORS; ++a) {
         float lg = raw[a * 17 + 16];
         if (lg < 0.85f) continue;  /* score > 0.7 */
@@ -1045,6 +1053,10 @@ static face_t face_decode(const float *raw, int w, int y1)
         float fw = r[2] / 128.0f * face_anchors[a][2], fh = r[3] / 128.0f * face_anchors[a][3];
         if (fabsf(x - bx) > fw * 0.5f || fabsf(y - by) > fh * 0.5f) continue;  /* not the same face */
         wsum += sc; cx += sc * x; cy += sc * y; ww += sc * fw; hh += sc * fh;
+        for (int k = 0; k < 6; ++k) {
+            kx[k] += sc * (r[4 + 2 * k] / 128.0f * face_anchors[a][2] + face_anchors[a][0]);
+            ky[k] += sc * (r[5 + 2 * k] / 128.0f * face_anchors[a][3] + face_anchors[a][1]);
+        }
     }
     if (wsum <= 0.0f) return f;
     cx /= wsum; cy /= wsum; ww /= wsum; hh /= wsum;
@@ -1059,6 +1071,12 @@ static face_t face_decode(const float *raw, int w, int y1)
     f.y = (cy * (float)CROP_SIZE) * sy;
     f.w = ww * (float)CROP_SIZE * sx;
     f.h = hh * (float)CROP_SIZE * sy;
+    for (int k = 0; k < 6; ++k) {
+        f.kx[k] = ((float)CROP_X0 + kx[k] / wsum * (float)CROP_SIZE - cam_x0) * sx;
+        f.ky[k] = (ky[k] / wsum * (float)CROP_SIZE) * sy;
+    }
+    /* head roll from the eyes (degrees, + = tilted toward the screen's right) */
+    f.roll = atan2f(f.ky[1] - f.ky[0], f.kx[1] - f.kx[0]) * 57.2958f;
     return f;
 }
 
@@ -1237,6 +1255,11 @@ void bunny_demo_loop(void)
     float face_seen_s = 0.0f, face_lost_s = 0.0f, sh_x = 0.0f, sh_y = 0.0f, ride_t = 0.0f;
     float jump_x0 = 0.0f, jump_y0 = 0.0f;
     int ride = 0;          /* 0 on the floor, 1 jumping up, 2 riding, 3 hopping down */
+    int ride_side = 1;     /* which shoulder (screen side: -1 left, +1 right), locked at the jump */
+    int glitches = 0;      /* detections rejected as jumps */
+    face_t fs;             /* smoothed face */
+    memset(&fs, 0, sizeof(fs));
+    float gaze = 0.0f;     /* 0..1: how much he looks at your face */
     uint32_t cam_frames = 0, face_us = 0;
     int touch_fails = 0, imu_fails = 0;
     uint32_t was_pressed = 0, frame = 0, nn_us_acc = 0;
@@ -1580,20 +1603,45 @@ void bunny_demo_loop(void)
 
         /* camera world: jump onto the shoulder of the person in view, ride it */
         if (cam_mode) {
-            if (face.ok) { face_seen_s += dt; face_lost_s = 0.0f; }
-            else { face_lost_s += dt; if (face_lost_s > 0.3f) face_seen_s = 0.0f; }
-            if (face.ok) {
-                int left = (bx + (float)spr / 2.0f) < face.x;  /* the shoulder on the bunny's side */
-                float tx = face.x + (left ? -1.1f : 1.1f) * face.w, ty = face.y + 1.25f * face.h;
-                if (tx < 40.0f) tx = face.x + 1.1f * face.w;
-                if (tx > (float)w - 40.0f) tx = face.x - 1.1f * face.w;
+            int fresh = face.ok;
+            face.ok = 0;  /* consumed */
+            if (fresh && fs.ok) {  /* reject one-off jumps (a glitch), accept if it repeats */
+                float jx = fabsf(face.x - fs.x), jy = fabsf(face.y - fs.y);
+                if ((jx > FACE_JUMP_MAX * fs.w || jy > FACE_JUMP_MAX * fs.h) && glitches < 2) {
+                    ++glitches;
+                    fresh = 0;
+                } else {
+                    glitches = 0;
+                }
+            }
+            if (fresh) {
+                float a = fs.ok ? 0.5f : 1.0f;  /* smooth the face itself */
+                fs.x += (face.x - fs.x) * a; fs.y += (face.y - fs.y) * a;
+                fs.w += (face.w - fs.w) * a; fs.h += (face.h - fs.h) * a;
+                fs.roll += (face.roll - fs.roll) * a;
+                fs.score = face.score;
+                fs.ok = 1;
+                face_seen_s += dt * FACE_EVERY; face_lost_s = 0.0f;
+            } else {
+                face_lost_s += dt;
+                if (face_lost_s > 0.3f) face_seen_s = 0.0f;
+                if (face_lost_s > FACE_LOST_S) fs.ok = 0;
+            }
+            if (fs.ok) {
+                if (ride == 0 || ride == 3) ride_side = (bx + (float)spr / 2.0f) < fs.x ? -1 : 1;  /* the side he is on */
+                float tx = fs.x + (float)ride_side * SHOULDER_DX * fs.w, ty = fs.y + SHOULDER_DY * fs.h;
+                /* that shoulder off the screen: use the other one */
+                if (tx < 30.0f || tx > (float)w - 30.0f) {
+                    ride_side = -ride_side;
+                    tx = fs.x + (float)ride_side * SHOULDER_DX * fs.w;
+                }
                 if (ty > (float)GRAPH_Y0 - 10.0f) ty = (float)GRAPH_Y0 - 10.0f;
-                float a = (ride == 2) ? 0.35f : 1.0f;  /* smooth while riding */
+                float a = (ride == 2) ? 0.3f : 1.0f;  /* gentle while riding */
                 sh_x += (tx - sh_x) * a;
                 sh_y += (ty - sh_y) * a;
             }
             ride_t += dt;
-            if (ride == 0 && face_seen_s > FACE_STABLE_S && st != ST_LIE && st != ST_SLEEP) {
+            if (ride == 0 && fs.ok && face_seen_s > FACE_STABLE_S && st != ST_LIE && st != ST_SLEEP) {
                 ride = 1;  /* jump! */
                 ride_t = 0.0f;
                 jump_x0 = bx;
@@ -1602,7 +1650,7 @@ void bunny_demo_loop(void)
                 set_clip(CLIP_HOP);
                 action_len = 0.8f;
                 state_t_s = 0.0f;
-                printf("bunny: jumping onto the shoulder (face %d%%)\n", (int)(face.score * 100.0f));
+                printf("bunny: jumping onto the %s shoulder (face %d%%)\n", ride_side < 0 ? "left" : "right", (int)(fs.score * 100.0f));
             } else if (ride == 1 && ride_t > 0.8f) {
                 ride = 2;  /* landed: ride along */
                 st = ST_ACTION;
@@ -1624,11 +1672,12 @@ void bunny_demo_loop(void)
                 state_t_s = 0.0f;
             }
             if (ride == 2) idle_s = 0.0f;  /* no napping on a shoulder */
-        } else if (ride) {
+        } else if (ride || fs.ok) {
             ride = 0;
-            face.ok = 0;
+            face.ok = fs.ok = 0;
             face_seen_s = face_lost_s = 0.0f;
         }
+        gaze += ((cam_mode && fs.ok ? 1.0f : 0.0f) - gaze) * (dt * 4.0f > 1.0f ? 1.0f : dt * 4.0f);
         if (st != ST_SLEEP) hunger -= dt / HUNGER_S;
         if (hunger < 0.0f) hunger = 0.0f;
         if (hungry_nag > 0.0f) hungry_nag -= dt;
@@ -1796,6 +1845,25 @@ void bunny_demo_loop(void)
             target.d[D_EYE_WIDE] += 0.8f * p;
             target.d[D_LOOK_Y] = -3.0f * p;
         }
+        if (gaze > 0.01f && fs.ok) {
+            /* he looks at your face; on your shoulder he copies your head tilt; lean in close and he is surprised */
+            float hx = (float)(ride ? sh_x : bx + (float)spr / 2.0f);
+            float hy = ride ? sh_y - 0.7f * (float)spr : (float)(GROUND_Y - spr) + 0.35f * (float)spr;
+            float lx = (fs.x - hx) / 30.0f, ly = (fs.y - hy) / 30.0f;
+            if (facing_left) lx = -lx;  /* the sprite is mirrored */
+            lx = lx > 7.0f ? 7.0f : (lx < -7.0f ? -7.0f : lx);
+            ly = ly > 6.0f ? 6.0f : (ly < -6.0f ? -6.0f : ly);
+            target.d[D_LOOK_X] += (lx - target.d[D_LOOK_X]) * gaze;
+            target.d[D_LOOK_Y] += (ly - target.d[D_LOOK_Y]) * gaze;
+            float tilt = ride == 2 ? fs.roll * 0.8f : lx * 1.6f;
+            if (facing_left && ride == 2) tilt = -tilt;
+            tilt = tilt > 16.0f ? 16.0f : (tilt < -16.0f ? -16.0f : tilt);
+            target.d[D_HEAD_TILT] += (tilt - target.d[D_HEAD_TILT]) * gaze;
+            if (!ride && fs.w > 0.42f * (float)w) {  /* very close: wide eyes */
+                for (int i = D_EYE_OPEN; i <= D_EYE_SAD; ++i) target.d[i] *= 0.3f;
+                target.d[D_EYE_WIDE] += 0.7f;
+            }
+        }
         if (frame == 0) shown = target;
         for (int i = 0; i < BUNNY_NDIAL; ++i) shown.d[i] += (target.d[i] - shown.d[i]) * DIAL_SMOOTH;
         shown.dx += (target.dx - shown.dx) * DIAL_SMOOTH;
@@ -1864,9 +1932,9 @@ void bunny_demo_loop(void)
                 face_us = us_since(fc0);
             }
             camera_capture_start();
-            if (FACE_BOX && face.ok) {
-                draw_box((int)(face.x - face.w / 2), (int)(face.y - face.h / 2), (int)(face.x + face.w / 2),
-                         (int)(face.y + face.h / 2), 120, 255, 160);
+            if (FACE_BOX && fs.ok) {
+                draw_box((int)(fs.x - fs.w / 2), (int)(fs.y - fs.h / 2), (int)(fs.x + fs.w / 2),
+                         (int)(fs.y + fs.h / 2), 120, 255, 160);
             }
         } else {
             clear_world(w);
@@ -1909,8 +1977,8 @@ void bunny_demo_loop(void)
             g_bunny_nn_us = nn_us_acc / 60;
             t_stat = t1;
             nn_us_acc = 0;
-            if (cam_mode) printf("face: %s score %d%% at %d,%d size %d, detect %lu us, ride %d\n", face.ok ? "yes" : "no",
-                                 (int)(face.score * 100.0f), (int)face.x, (int)face.y, (int)face.w, (unsigned long)face_us, ride);
+            if (cam_mode) printf("face: %s score %d%% at %d,%d size %d roll %d, detect %lu us, ride %d side %d\n", fs.ok ? "yes" : "no",
+                                 (int)(fs.score * 100.0f), (int)fs.x, (int)fs.y, (int)fs.w, (int)fs.roll, (unsigned long)face_us, ride, ride_side);
             printf("bunny: [%s] %lu fps, NN %lu us, state %s, clip %s, imu %d, mic %d dB, stack %lu B\n",
                    cam_mode ? "camera" : "home", (unsigned long)g_bunny_fps, (unsigned long)g_bunny_nn_us, state_names[st],
                    bunny_clip_name(clip), (int)motion, (int)graph_db[GRAPH_N - 1], (unsigned long)stack_used());
