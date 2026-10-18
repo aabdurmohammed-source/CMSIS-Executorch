@@ -1521,7 +1521,7 @@ void bunny_demo_loop(void)
     if (wdt_rc == ARM_DRIVER_OK) wdt_rc = Driver_WDT0.Start();
     printf("bunny: watchdog %d ms -> %d\n", WATCHDOG_MS, wdt_rc);
     printf("bunny: running\n");
-    snprintf(bubble_text, sizeof(bubble_text), "HEY!|MY NAME IS ALF!");  /* hello on start-up, with a wave */
+    snprintf(bubble_text, sizeof(bubble_text), "HEY!|MY NAME IS ALFY!");  /* hello on start-up, with a wave */
     bubble_t = 4.0f;
     g_force_clip = CLIP_WAVE;
     for (;;) {
@@ -1591,11 +1591,12 @@ void bunny_demo_loop(void)
             poked = 0;
             if (camera_rc == 0 || cam_mode) {
                 cam_mode = !cam_mode;
-                if (cam_mode) {
-                    camera_capture_start();
-                } else {
-                    camera_capture_abort();
-                }
+                /* Entering: start a snapshot. Leaving: do NOT stop the camera. A full
+                 * Driver_CPI.Stop() puts the sensor in standby and stops the CSI link,
+                 * and after that the camera froze on its first frame the next time
+                 * (Abdul). A snapshot still in flight just finishes; it is picked up
+                 * (and replaced) on the next visit. */
+                if (cam_mode) camera_capture_start();
                 float centre = bx + (float)spr / 2.0f;
                 spr = cam_mode ? SPRITE_CAM_PX : spr_home;
                 build_tables();

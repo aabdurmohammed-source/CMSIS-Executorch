@@ -1,12 +1,12 @@
-# Alf: an on-device generative AI companion on the Alif Ensemble E8
+# Alfy: an on-device generative AI companion on the Alif Ensemble E8
 
-Alf is a small purple bunny who lives on the Alif E8 DevKit's screen. He is not
+Alfy is a small purple bunny who lives on the Alif E8 DevKit's screen. He is not
 a set of pre-drawn sprites: a neural network on the **Ethos-U85 NPU draws every
 frame** of him from 32 "pose dials" (ears, eyes, mouth, arms, tilt...). On top of
 that sit three more models on the same NPU and a personality engine on the
 Cortex-M55, so he can:
 
-- **see you**: in the camera world a face detector finds you, Alf looks at you,
+- **see you**: in the camera world a face detector finds you, Alfy looks at you,
   copies your head tilt and jumps onto your shoulder;
 - **hear you**: push-to-talk keyword spotting (up, down, left, right, go, stop,
   yes, no, happy), any voice, no training needed;
@@ -24,7 +24,7 @@ Everything runs on the board. No cloud, no host PC, no camera frames stored.
 
 > Arm + Meta ExecuTorch Edge AI Hackathon, SFSU, October 17-18 2026.
 > Team: Abdul Mohammed and Awab Ibrahim.
-> Judged version: tag **`v1.0-demo`** (the tag points at the exact commit used in the demo).
+> Judged version: tag **`v1.1-demo`** (the tag points at the exact commit used in the demo).
 
 ---
 
@@ -312,7 +312,7 @@ Output: `out/cmsis-executorch/DevKit-E8/Debug/cmsis-executorch.hex` (and `.axf`)
    bunny: [home] 20 fps, NN 15383 us, state idle, clip idle, ...
    ```
 
-3. Alf waves and says "HEY! MY NAME IS ALF!".
+3. Alfy waves and says "HEY! MY NAME IS ALFY!".
 
 Troubleshooting: if the first model reports `Inference already running` right
 after a debugger reset, reset once more (a J-Link reset does not reset the NPU).
@@ -411,7 +411,7 @@ tools/                flash_se.sh (flash via the Secure Enclave), u55_test (the 
 
 - Base project: [Arm-Examples/CMSIS-Executorch](https://github.com/Arm-Examples/CMSIS-Executorch)
   (Apache 2.0, see `LICENSE`): the CMSIS solution, `create_ai_layer.py` flow and
-  ExecuTorch runtime integration. Everything under "Alf" (bunny app, models,
+  ExecuTorch runtime integration. Everything under "Alfy" (bunny app, models,
   training, drivers for camera / display / mic / IMU in `board/DevKit-E8/`) was
   written during the hackathon.
 - [ExecuTorch](https://github.com/pytorch/executorch) (BSD), Arm Ethos-U driver

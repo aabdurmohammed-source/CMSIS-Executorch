@@ -92,12 +92,20 @@ int camera_capture(void)
  * work meanwhile. (Continuous CaptureVideo raised a bus error and broke the
  * NN's memory, so it is not used.) */
 static int cam_busy;
+volatile uint32_t g_cam_frames;   /* debugger-readable: snapshots completed */
+volatile int32_t g_cam_err;       /* debugger-readable: last CaptureFrame error (0 = none) */
+volatile uint32_t g_cam_errs;     /* debugger-readable: CaptureFrame failures */
 
 int camera_capture_start(void)
 {
     if (cam_busy) return 1;
     cam_events = 0;
-    if (Driver_CPI.CaptureFrame(cam_buf) != ARM_DRIVER_OK) return -1;
+    int32_t r = Driver_CPI.CaptureFrame(cam_buf);
+    if (r != ARM_DRIVER_OK) {
+        g_cam_err = r;
+        ++g_cam_errs;
+        return -1;
+    }
     cam_busy = 1;
     return 0;
 }
@@ -106,6 +114,7 @@ int camera_capture_poll(void)
 {
     if (!cam_busy || !(cam_events & ARM_CPI_EVENT_CAMERA_CAPTURE_STOPPED)) return 0;
     cam_busy = 0;
+    ++g_cam_frames;
     SCB_InvalidateDCache_by_Addr((uint32_t *)cam_buf, (int32_t)sizeof(cam_buf));
     return 1;
 }
