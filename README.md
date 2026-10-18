@@ -23,8 +23,8 @@ Cortex-M55, so he can:
 Everything runs on the board. No cloud, no host PC, no camera frames stored.
 
 > Arm + Meta ExecuTorch Edge AI Hackathon, SFSU, October 17-18 2026.
-> Team: Abdul Mohammed and _(teammate name)_.
-> Judged version: tag **`v1.0-demo`** _(commit hash to be filled in at release)_.
+> Team: Abdul Mohammed and Awab Ibrahim.
+> Judged version: tag **`v1.0-demo`** (the tag points at the exact commit used in the demo).
 
 ---
 
@@ -245,10 +245,24 @@ loudest moment) and a 1 s window is centred on it.
   from `vcpkg-configuration.json` (CMSIS-Toolbox 2.15, Arm Compiler 6.24, CMake,
   Ninja).
 - **SEGGER J-Link** software 8.42 or later (the board has an on-board J-Link) and
-  **Alif SETOOLS** 1.110 or later (Alif login) for the one-time board setup.
+  **Alif SETOOLS** 1.110 or later (Alif login) for the one-time board setup. Add
+  the SETOOLS folder to the VS Code user settings: `"alif.setools.root": "C:/path/to/setools"`.
 
-The full first-time setup (tools, SW4 switch, installing the M55_HP debug stub
-with SETOOLS) is in **[documentation/setup-guide.md](documentation/setup-guide.md)**.
+### One-time board setup
+
+Switch **SW4** selects what the USB serial port talks to: **SEUART** (the Secure
+Enclave, used by SETOOLS) or **UART4** (the application console, 115200 8N1).
+
+1. SW4 to **SEUART**, PRG USB connected. In the SETOOLS folder run
+   `updateSystemPackage -d` once (answer yes to making the E8 the default target),
+   and start J-Link Commander once (it updates the on-board J-Link and installs
+   its drivers).
+2. Open this folder in VS Code, accept the tool and pack installation, CMSIS view
+   -> Manage Solution -> target-type **DevKit-E8** -> Apply.
+3. Run **Terminal > Run Task > Alif: Install M55_HP debug stubs (DevKit-E8, single
+   core configuration)**. This writes the boot table that lets the Secure Enclave
+   start the M55_HP core and the debugger load the application.
+4. SW4 back to **UART4**.
 
 ### Build
 
@@ -363,8 +377,6 @@ ai_layer/             generated AI layer with the bunny decoder program
 model/                PyTorch models, datasets and training / export scripts (bunny, doodle, blazeface, kws)
 create_ai_layer.py    PyTorch -> ExecuTorch (PT2E quantisation, Ethos-U partitioner, Vela) -> AI layer
 tools/                flash_se.sh (flash via the Secure Enclave), u55_test (the second NPU test)
-documentation/        setup guide, the original example docs, MLOps flow
-PROGRESS.md           full engineering log of the hackathon (every problem and fix)
 ```
 
 ## 9. Design decisions
@@ -412,6 +424,8 @@ PROGRESS.md           full engineering log of the hackathon (every problem and f
 - **Quick, Draw! dataset**: Google (CC BY 4.0), used to train the doodle classifier.
 - DS-CNN keyword-spotting architecture after Zhang et al., "Hello Edge: Keyword
   Spotting on Microcontrollers" (Arm, 2017).
-- The bunny character, its vector rig and dataset are the team's own work.
+- The bunny character design and its vector rig were generated with AI from the
+  team's prompts; the training dataset is rendered from that rig by our
+  `model/bunny/make_dataset.py`.
 - Development was assisted by an AI coding assistant (Claude); the ideas, design
   choices and testing on the hardware are the team's.
