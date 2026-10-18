@@ -1322,6 +1322,7 @@ void bunny_demo_loop(void)
     int mic_rc = mic_init();
     io_init();
     int touch_rc = gt_setup();
+    for (int k = 0; k < 3 && touch_rc != 0; ++k) touch_rc = gt_recover();  /* not found: clear the bus, reset, retry */
     int imu_rc = imu_init();
     printf("bunny: display=%d camera=%d mic=%d touch=%d imu=%d\n", display_rc, camera_rc, mic_rc, touch_rc, imu_rc);
     if (display_rc != 0) {
@@ -1397,6 +1398,7 @@ void bunny_demo_loop(void)
     float gaze = 0.0f;     /* 0..1: how much he looks at your face */
     uint32_t cam_frames = 0, face_us = 0;
     int touch_fails = 0, imu_fails = 0, touch_bad = 0;
+    float touch_retry = 5.0f;
     uint32_t was_pressed = 0, frame = 0, nn_us_acc = 0;
     rect_t prev = {0, 0, 0, 0}, prev_dot = {0, 0, 0, 0};
     uint32_t t_prev = DWT->CYCCNT, t_stat = t_prev;
@@ -1423,6 +1425,13 @@ void bunny_demo_loop(void)
         int any_input = 0, poked = 0;
         uint32_t st0 = DWT->CYCCNT, us_touch = 0, us_imu = 0, us_mic = 0, us_nn = 0, us_draw = 0;
         if (touch_pause > 0.0f) touch_pause -= dt;
+        if (touch_rc != 0) {  /* touch lost: try to bring it back every 5 s */
+            touch_retry -= dt;
+            if (touch_retry <= 0.0f) {
+                touch_rc = gt_recover();
+                touch_retry = 5.0f;
+            }
+        }
         if (touch_rc == 0 && touch_pause <= 0.0f) {
             int tx, ty, r = gt_poll(&tx, &ty);
             if (r < 0) {
