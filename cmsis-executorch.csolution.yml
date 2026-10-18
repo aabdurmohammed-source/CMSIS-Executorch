@@ -126,8 +126,10 @@ solution:
       # configuration to .cmsis/ensemble_vela.ini and emits it, together with
       # --accelerator-config ethos-u85-256, for both targets. These names
       # come from that file (the FVP's Ethos_U85_SYS_DRAM_Mid is not in it).
-      system: Ethos_U85_SRAM_MRAM
-      memory: Shared_Sram
+      # SRAM only: the firmware copies the model into SRAM and the NPU reads it
+      # through its SRAM port (the EXT port bus-faulted outside low MRAM).
+      system: Ethos_U85_SRAM_Only
+      memory: Sram_Only
     model:
       clayer: $AI-Layer$
       name: BunnyDecoderV2

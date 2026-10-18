@@ -13,6 +13,7 @@
 #include <array>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <memory>
 
 #include <executorch/extension/data_loader/buffer_data_loader.h>
@@ -55,8 +56,10 @@ namespace {
 constexpr size_t kMethodPoolSize = APP_METHOD_POOL_SIZE;
 constexpr size_t kTempPoolSize = APP_TEMP_POOL_SIZE;
 
-alignas(16) uint8_t g_method_pool[kMethodPoolSize] APP_POOL_ATTRIBUTES;
+// Temp (NPU scratch) first: it then starts at the bottom of SRAM0, and a large
+// scratch arena does not straddle the SRAM0/SRAM1 boundary (0x02400000).
 alignas(16) uint8_t g_temp_pool[kTempPoolSize] APP_POOL_ATTRIBUTES;
+alignas(16) uint8_t g_method_pool[kMethodPoolSize] APP_POOL_ATTRIBUTES;
 
 constexpr size_t kLatent = 16;
 constexpr size_t kFacePixels = 32 * 32;
@@ -156,8 +159,8 @@ extern "C" const unsigned char doodle_pte[];
 extern "C" const unsigned long doodle_pte_size;
 namespace {
 constexpr size_t kDoodleIn = 28 * 28;
-alignas(16) uint8_t g_doodle_method_pool[256 * 1024] APP_POOL_ATTRIBUTES;
-alignas(16) uint8_t g_doodle_temp_pool[256 * 1024] APP_POOL_ATTRIBUTES;
+alignas(16) uint8_t g_doodle_method_pool[64 * 1024] APP_POOL_ATTRIBUTES;
+alignas(16) uint8_t g_doodle_temp_pool[64 * 1024] APP_POOL_ATTRIBUTES;  // Vela scratch ~20 KB
 alignas(16) float g_doodle_in[kDoodleIn];
 EmbeddedModule* g_doodle = nullptr;
 Tensor* g_doodle_tensor = nullptr;
@@ -214,9 +217,26 @@ extern "C" int app_main(void) {
 
   printf("ExecuTorch Ethos-U85 example: %lu byte model\n", model_pte_size);
 
+  // APP_MODEL_SRAM_SIZE: run the model from a copy in SRAM. A large model's
+  // weights end up in MRAM above 0x80400000, which the NPU could not read
+  // ("NPU error(s) during inference"); the CPU can, so it copies them once.
+  const unsigned char* pte = model_pte;
+#ifdef APP_MODEL_SRAM_SIZE
+  static uint8_t g_model_sram[APP_MODEL_SRAM_SIZE] __attribute__((aligned(16))) APP_POOL_ATTRIBUTES;
+  if (model_pte_size <= sizeof(g_model_sram)) {
+    memcpy(g_model_sram, model_pte, model_pte_size);
+    SCB_CleanDCache_by_Addr(reinterpret_cast<uint32_t*>(g_model_sram), static_cast<int32_t>(model_pte_size));
+    pte = g_model_sram;
+    printf("model copied to SRAM at %p\n", static_cast<void*>(g_model_sram));
+  } else {
+    printf("model (%lu bytes) does not fit the SRAM copy (%u bytes), running from MRAM\n",
+           model_pte_size, static_cast<unsigned>(sizeof(g_model_sram)));
+  }
+#endif
+
   EmbeddedModule module(
-      model_pte, model_pte_size,
-      std::make_unique<BufferDataLoader>(model_pte, model_pte_size),
+      pte, model_pte_size,
+      std::make_unique<BufferDataLoader>(pte, model_pte_size),
       std::make_unique<MemoryAllocator>(kMethodPoolSize, g_method_pool),
       std::make_unique<MemoryAllocator>(kTempPoolSize, g_temp_pool));
 
@@ -317,9 +337,18 @@ extern "C" int app_main(void) {
 #ifdef BOARD_BUNNY_DEMO
   {
     // The doodle classifier lives as long as the bunny loop (which never returns)
+    // Run from SRAM as well: the NPU reads command stream and weights through
+    // its SRAM port (NPU_QCONFIG / NPU_REGIONCFG_0 = 0 in the board layer).
+    static uint8_t g_doodle_sram[96 * 1024] __attribute__((aligned(16))) APP_POOL_ATTRIBUTES;
+    const unsigned char* dpte = doodle_pte;
+    if (doodle_pte_size <= sizeof(g_doodle_sram)) {
+      memcpy(g_doodle_sram, doodle_pte, doodle_pte_size);
+      SCB_CleanDCache_by_Addr(reinterpret_cast<uint32_t*>(g_doodle_sram), static_cast<int32_t>(doodle_pte_size));
+      dpte = g_doodle_sram;
+    }
     static EmbeddedModule doodle(
-        doodle_pte, doodle_pte_size,
-        std::make_unique<BufferDataLoader>(doodle_pte, doodle_pte_size),
+        dpte, doodle_pte_size,
+        std::make_unique<BufferDataLoader>(dpte, doodle_pte_size),
         std::make_unique<MemoryAllocator>(sizeof(g_doodle_method_pool), g_doodle_method_pool),
         std::make_unique<MemoryAllocator>(sizeof(g_doodle_temp_pool), g_doodle_temp_pool));
     static std::array<SizesType, 4> dsizes{1, 1, 28, 28};
