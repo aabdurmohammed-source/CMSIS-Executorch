@@ -166,6 +166,41 @@ EmbeddedModule* g_doodle = nullptr;
 Tensor* g_doodle_tensor = nullptr;
 }  // namespace
 
+// Third program: BlazeFace (board/DevKit-E8/face_pte.c, model/blazeface/export_blazeface.py).
+// It shares the bunny's NPU scratch pool: the models never run at the same time.
+extern "C" const unsigned char face_pte[];
+extern "C" const unsigned long face_pte_size;
+namespace {
+constexpr size_t kFaceIn = 3 * 128 * 128;
+alignas(16) uint8_t g_face_method_pool[384 * 1024] APP_POOL_ATTRIBUTES;
+alignas(16) float g_face_in[kFaceIn] APP_POOL_ATTRIBUTES;
+EmbeddedModule* g_face = nullptr;
+Tensor* g_face_tensor = nullptr;
+}  // namespace
+
+// The face detector's input: 3 x 128 x 128 floats (RGB planes, -1..1). Fill it, then face_detect().
+extern "C" float* face_input(void) {
+  return g_face_in;
+}
+
+// Runs BlazeFace on face_input(); points *out at 896 x 17 floats (16 box/keypoint
+// regressors + 1 score logit per anchor), valid until the next run. Returns 0 on success.
+extern "C" int face_detect(const float** out) {
+  if (g_face == nullptr || g_face_tensor == nullptr) {
+    return -1;
+  }
+  auto outputs = g_face->forward(*g_face_tensor);
+  if (!outputs.ok() || outputs->empty() || !outputs->front().isTensor()) {
+    return -2;
+  }
+  Tensor t = outputs->front().toTensor();
+  if (t.scalar_type() != ScalarType::Float || t.numel() != 896 * 17) {
+    return -3;
+  }
+  *out = t.const_data_ptr<float>();
+  return 0;
+}
+
 // Classifies a 28x28 drawing (white strokes on black, 0..1, row major) and
 // writes up to n class scores (logits). Returns the number written, or < 0.
 extern "C" int doodle_classify(const float* in, float* scores, int n) {
@@ -367,6 +402,35 @@ extern "C" int app_main(void) {
     nd = doodle_classify(g_doodle_in, scores, 16);
     us = (DWT->CYCCNT - c0) / (SystemCoreClock / 1000000u);
     printf("doodle: classify %lu us on " NPU_NAME "\n", (unsigned long)us);
+
+    // Face detector, also from an SRAM copy; NPU scratch shared with the bunny
+    static uint8_t g_face_sram[288 * 1024] __attribute__((aligned(16))) APP_POOL_ATTRIBUTES;
+    const unsigned char* fpte = face_pte;
+    if (face_pte_size <= sizeof(g_face_sram)) {
+      memcpy(g_face_sram, face_pte, face_pte_size);
+      SCB_CleanDCache_by_Addr(reinterpret_cast<uint32_t*>(g_face_sram), static_cast<int32_t>(face_pte_size));
+      fpte = g_face_sram;
+    }
+    static EmbeddedModule face(
+        fpte, face_pte_size,
+        std::make_unique<BufferDataLoader>(fpte, face_pte_size),
+        std::make_unique<MemoryAllocator>(sizeof(g_face_method_pool), g_face_method_pool),
+        std::make_unique<MemoryAllocator>(kTempPoolSize, g_temp_pool));
+    static std::array<SizesType, 4> fsizes{1, 3, 128, 128};
+    static std::array<DimOrderType, 4> forder{0, 1, 2, 3};
+    static TensorImpl fimpl(ScalarType::Float, 4, fsizes.data(), g_face_in, forder.data());
+    static Tensor ftensor(&fimpl);
+    g_face = &face;
+    g_face_tensor = &ftensor;
+    const float* fo = nullptr;
+    c0 = DWT->CYCCNT;
+    int fr = face_detect(&fo);
+    us = (DWT->CYCCNT - c0) / (SystemCoreClock / 1000000u);
+    printf("face: %lu byte model, test run -> %d, %lu us (first run)\n", face_pte_size, fr, (unsigned long)us);
+    c0 = DWT->CYCCNT;
+    fr = face_detect(&fo);
+    us = (DWT->CYCCNT - c0) / (SystemCoreClock / 1000000u);
+    printf("face: detect %lu us on " NPU_NAME "\n", (unsigned long)us);
   }
   bunny_demo_loop();
 #else
