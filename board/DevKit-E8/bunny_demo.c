@@ -599,30 +599,39 @@ static void draw_sprite(int ox, int oy, int flip, int key)
 /* The MT9M114 picture is dim and washed out indoors: brighten it toward a
  * target average (gain follows the last frame) and push the colours away from
  * grey. Only what is shown changes; BlazeFace still sees the raw frame. */
-#define CAM_SAT         420     /* saturation x256 (420 = 1.64x)        */
+#define CAM_SAT         460     /* saturation x256 (460 = 1.8x)         */
 #define CAM_TARGET_Y    105     /* average brightness to aim for        */
 #define CAM_MAX_GAIN    3.0f
 #define CAM_GAMMA       0.85f   /* < 1 lifts the shadows                */
+#define CAM_WB          0.25f   /* white balance: 0 off, 1 full grey-world (removes the room light's tint) */
 
 static void draw_camera_bg(int w, int y1, int sox, int soy, int sflip)
 {
     static uint16_t cam_x[480];
     static int ready;
-    static uint8_t lut[256];
-    static float gain = 1.5f;
-    static uint32_t ysum, yn;
-    if (yn > 0) {  /* new gain from the last frame's brightness */
+    static uint8_t lut[3][256];
+    static float gain = 1.5f, wb[3] = {1.0f, 1.0f, 1.0f};
+    static uint32_t ysum, yn, csum[3];
+    if (yn > 0) {  /* new gain and white balance from the last frame */
         float mean = (float)ysum / (float)yn;
         float g = (float)CAM_TARGET_Y / (mean > 1.0f ? mean : 1.0f);  /* mean = raw brightness */
         g = g < 1.0f ? 1.0f : (g > CAM_MAX_GAIN ? CAM_MAX_GAIN : g);
         gain += (g - gain) * 0.3f;
-        for (int v = 0; v < 256; ++v) {
-            float o = 255.0f * powf((float)v * gain / 255.0f > 1.0f ? 1.0f : (float)v * gain / 255.0f, CAM_GAMMA);
-            lut[v] = (uint8_t)(o > 255.0f ? 255.0f : o);
+        for (int c = 0; c < 3; ++c) {  /* grey world: pull each channel's average toward the brightness */
+            float cm = (float)csum[c] / (float)yn;
+            float t = powf((mean + 1.0f) / (cm + 1.0f), CAM_WB);
+            t = t < 0.7f ? 0.7f : (t > 1.5f ? 1.5f : t);
+            wb[c] += (t - wb[c]) * 0.3f;
+            for (int v = 0; v < 256; ++v) {
+                float x = (float)v * gain * wb[c] / 255.0f;
+                float o = 255.0f * powf(x > 1.0f ? 1.0f : x, CAM_GAMMA);
+                lut[c][v] = (uint8_t)(o > 255.0f ? 255.0f : o);
+            }
         }
         ysum = yn = 0;
+        csum[0] = csum[1] = csum[2] = 0;
     } else if (!ready) {
-        for (int v = 0; v < 256; ++v) lut[v] = (uint8_t)v;
+        for (int v = 0; v < 256; ++v) lut[0][v] = lut[1][v] = lut[2][v] = (uint8_t)v;
     }
     const uint8_t *cam = camera_frame();
     int cw = camera_width(), ch = camera_height();
@@ -643,14 +652,17 @@ static void draw_camera_bg(int w, int y1, int sox, int soy, int sflip)
             if (ink_at(x, y)) { write_px(p, bpp, INK_R, INK_G, INK_B); continue; }
             int r = (v >> 11) << 3, g = ((v >> 5) & 0x3F) << 2, b = (v & 0x1F) << 3;
             int yy = (77 * r + 150 * g + 29 * b) >> 8;
-            if (((x | y) & 7) == 0) { ysum += (uint32_t)yy; ++yn; }  /* raw brightness, sampled */
+            if (((x | y) & 7) == 0) {  /* raw brightness and colour, sampled */
+                ysum += (uint32_t)yy; ++yn;
+                csum[0] += (uint32_t)r; csum[1] += (uint32_t)g; csum[2] += (uint32_t)b;
+            }
             r = yy + (((r - yy) * CAM_SAT) >> 8);
             g = yy + (((g - yy) * CAM_SAT) >> 8);
             b = yy + (((b - yy) * CAM_SAT) >> 8);
             r = r < 0 ? 0 : (r > 255 ? 255 : r);
             g = g < 0 ? 0 : (g > 255 ? 255 : g);
             b = b < 0 ? 0 : (b > 255 ? 255 : b);
-            write_px(p, bpp, lut[r], lut[g], lut[b]);
+            write_px(p, bpp, lut[0][r], lut[1][g], lut[2][b]);
         }
         draw_sprite_row(sox, soy, sflip, 1, y - soy);
     }
