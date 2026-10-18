@@ -247,10 +247,10 @@ Branch `bunny` (from working-checkpoint 432c0e53). Kit + data in model/bunny/ (t
 ## Polish (Sun Oct 18, ~01:30)
 - zzz: farther apart (378,82 / 434,38 / 478,4 in rig px); when he faces left the Zs move to that side but the letters are no longer mirrored; kept on screen at the edges. Verified both directions with screenshots.
 - Camera colour (display only, BlazeFace still gets the raw frame): auto brightness (gain from the last frame's average toward 105, max 3x, gamma 0.85 via a LUT) + 1.64x saturation. Camera world 12 fps (unchanged).
-- Camera NOT delivering frames right now: every capture "stops" with no error flags but the buffer stays all zeros (a dark room would still give noise). Same as the touch issue earlier = sensor/ribbon state, not code. Needs a power cycle / ribbon check by Abdul. (Buffer moved 0x02722800 -> 0x02746800 with the KWS model, still the same SRAM bank; a reach problem would give a partial frame, not zeros.)
+- (Black camera frames here = board face-down, lens covered; see correction below.) (Buffer moved 0x02722800 -> 0x02746800 with the KWS model, still the same SRAM bank; a reach problem would give a partial frame, not zeros.)
 - New helper: scratchpad shot.sh = screenshot of whichever frame buffer the LCD shows (reads 0x49031134), since buffer addresses move with every memory change.
 - Camera back after Abdul's check; shoulder ride works (Abdul), voice tested by Abdul + teammate: works.
 - Camera colour final: per-channel LUTs = auto gain x light grey-world white balance (CAM_WB 0.25; 0.6 over-corrected the yellow room to green-grey) x gamma 0.85, saturation 1.8x. Screenshot: warm, colourful, face box locked. 15 fps.
 - Gotcha: regenerate J-Link scripts that write globals (cw.jlink etc.) after every build; addresses shift.
 - Face box (debug) off for the demo (FACE_BOX 0).
-- Camera sensor sometimes stops streaming after J-Link warm resets (frames all exactly zero; USB power cycle fixes it). Added recovery: > 15 exactly-black frames in the camera world -> camera_restart() (CPI power off + Uninitialize + camera_init, watchdog fed around it), at most twice per boot. Not yet seen triggering (next boot streamed fine); a real power-on boot is what the demo uses anyway.
+- CORRECTION: the black camera frames (all exactly zero) were just the board lying face-down (lens covered), not a camera fault. The auto-restart added for it was removed again (it would restart the camera for nothing while face-down, on the I2C bus the touch panel shares). camera_restart() stays in camera.c, unused.
