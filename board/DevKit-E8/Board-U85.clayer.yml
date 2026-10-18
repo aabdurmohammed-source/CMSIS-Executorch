@@ -132,6 +132,7 @@ layer:
         - file: ./mic.c
         - file: ./mic.h
         - file: ./imu.c
+        - file: ./voice.c
         - file: ./imu.h
 
     - group: Ethos Interface

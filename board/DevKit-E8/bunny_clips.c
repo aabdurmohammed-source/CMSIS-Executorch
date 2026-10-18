@@ -30,7 +30,7 @@ static const float norm_hi[BUNNY_NDIAL] = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1
 
 static const char *const names[CLIP_COUNT] = {
     "idle", "look", "hop", "walk", "run", "wave", "shake", "lie_down", "sleep",
-    "sit", "yawn", "sad", "eat", "love", "stretch", "clap", "angry", "dizzy", "confused",
+    "sit", "yawn", "sad", "eat", "love", "stretch", "clap", "angry", "dizzy", "confused", "dance",
 };
 
 static float lerpf(float a, float b, float t) { return a + (b - a) * t; }
@@ -344,6 +344,35 @@ static void confused(float t, float a, bunny_pose_t *o)
     o->d[D_SQUASH] = 1.0f + 0.01f * sinf(TAU * t / 2.4f);
 }
 
+/* a little 120 bpm dance: sway side to side with a bounce on every beat;
+ * the arms alternate between waving up high and pumping, every 2 s */
+static void dance(float t, float a, bunny_pose_t *o)
+{
+    (void)a;
+    float beat = t / 0.5f;
+    float sw = sinf(PI * beat);          /* one side per beat */
+    float b = fabsf(sw);                 /* up on every beat */
+    int bar = (int)(t / 2.0f) & 1;
+    P(o, D_EYE_HAPPY, D_MOUTH_OPEN);
+    o->d[D_TILT] = 9.0f * sw;
+    o->d[D_HEAD_TILT] = -10.0f * sw;
+    o->d[D_SQUASH] = 0.96f + 0.1f * b;
+    o->d[D_EAR_L] = -14.0f - 14.0f * sw;
+    o->d[D_EAR_R] = 14.0f - 14.0f * sw;
+    o->d[D_CURL] = 12.0f * b;
+    if (bar == 0) {  /* hands in the air, waving with the beat */
+        o->d[D_ARM_L] = 120.0f + 25.0f * sw;
+        o->d[D_ARM_R] = -(120.0f - 25.0f * sw);
+    } else {         /* pump one arm, then the other */
+        o->d[D_ARM_L] = sw > 0.0f ? 20.0f + 110.0f * sw : 10.0f;
+        o->d[D_ARM_R] = sw < 0.0f ? -(20.0f - 110.0f * sw) : -10.0f;
+    }
+    o->d[D_FOOT_L] = sw > 0.0f ? -12.0f * sw : 0.0f;  /* step on the beat */
+    o->d[D_FOOT_R] = sw < 0.0f ? 12.0f * sw : 0.0f;
+    o->dx = 28.0f * sw;
+    o->dy = -16.0f * b;
+}
+
 void bunny_clip(bunny_clip_t clip, float t, float a, bunny_pose_t *o)
 {
     switch (clip) {
@@ -365,6 +394,7 @@ void bunny_clip(bunny_clip_t clip, float t, float a, bunny_pose_t *o)
     case CLIP_ANGRY:    angry(t, a, o); break;
     case CLIP_DIZZY:    dizzy(t, a, o); break;
     case CLIP_CONFUSED: confused(t, a, o); break;
+    case CLIP_DANCE:    dance(t, a, o); break;
     case CLIP_IDLE:
     default:            idle(t, a, o); break;
     }
@@ -378,6 +408,7 @@ float bunny_clip_duration(bunny_clip_t clip)
     case CLIP_SAD:
     case CLIP_YAWN:
     case CLIP_STRETCH: return 3.0f;
+    case CLIP_DANCE:   return 4.0f;
     default:           return 2.4f;
     }
 }

@@ -47,6 +47,8 @@ static const uint32_t ch5_fir[18] = {0x00000000, 0x000007FF, 0x00000000, 0x00000
 extern ARM_DRIVER_PDM Driver_PDM;
 
 static int16_t           mic_buf[SAMPLES];
+static int16_t           rec_buf[MIC_REC_SAMPLES * 2U];  /* a recording, both channels */
+static volatile int      recording;
 static volatile uint32_t mic_event;
 static uint32_t          mic_blocks;
 
@@ -115,6 +117,7 @@ static float channel_rms(int offset)
 
 int mic_poll(float *level)
 {
+    if (recording) return 0;  /* the recording owns the mics */
     if (!(mic_event & (ARM_PDM_EVENT_CAPTURE_COMPLETE | ARM_PDM_EVENT_ERROR))) {
         return 0;
     }
@@ -126,6 +129,52 @@ int mic_poll(float *level)
     }
     start_block();
     return ok ? 1 : -1;
+}
+
+int mic_record_start(void)
+{
+    /* the driver takes a new buffer even while a block is running: switch to the long one */
+    __disable_irq();
+    recording = 1;
+    mic_event = 0;
+    int32_t r = Driver_PDM.Receive(rec_buf, MIC_REC_SAMPLES * 2U);
+    __enable_irq();
+    if (r != ARM_DRIVER_OK) {
+        recording = 0;
+        start_block();
+        return -1;
+    }
+    return 0;
+}
+
+int mic_record_poll(const int16_t **pcm, int *n)
+{
+    if (!recording) return -1;
+    if (!(mic_event & ARM_PDM_EVENT_CAPTURE_COMPLETE)) return 0;  /* errors (overflow) do not stop a capture */
+    /* keep the louder mic, as mono, in place */
+    int64_t s0 = 0, s1 = 0, q0 = 0, q1 = 0;
+    for (uint32_t i = 0; i < MIC_REC_SAMPLES; ++i) {
+        int32_t a = rec_buf[2U * i], b = rec_buf[2U * i + 1U];
+        s0 += a; s1 += b; q0 += (int64_t)a * a; q1 += (int64_t)b * b;
+    }
+    float v0 = (float)q0 - (float)s0 * (float)s0 / MIC_REC_SAMPLES;
+    float v1 = (float)q1 - (float)s1 * (float)s1 / MIC_REC_SAMPLES;
+    uint32_t ch = v1 > v0 ? 1U : 0U;
+    for (uint32_t i = 0; i < MIC_REC_SAMPLES; ++i) rec_buf[i] = rec_buf[2U * i + ch];
+    recording = 0;
+    start_block();  /* back to the loudness blocks */
+    *pcm = rec_buf;
+    *n = (int)MIC_REC_SAMPLES;
+    return 1;
+}
+
+void mic_record_cancel(void)
+{
+    if (!recording) return;
+    __disable_irq();
+    recording = 0;
+    start_block();
+    __enable_irq();
 }
 
 uint32_t mic_block_count(void)

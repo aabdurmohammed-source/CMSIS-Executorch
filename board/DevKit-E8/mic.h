@@ -16,6 +16,16 @@ int mic_poll(float *level);
 
 uint32_t mic_block_count(void);
 
+/* Recording for speech: 1.5 s at 8 kHz. Starts now; mic_poll() pauses meanwhile. */
+#define MIC_REC_SAMPLES 12000U
+int mic_record_start(void);
+
+/* Non-blocking. 1 = done: *pcm holds *n mono samples (the louder mic) until the
+ * next recording; 0 = still recording; -1 = not recording. */
+int mic_record_poll(const int16_t **pcm, int *n);
+
+void mic_record_cancel(void);
+
 #ifdef __cplusplus
 }
 #endif

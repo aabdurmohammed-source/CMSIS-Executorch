@@ -36,6 +36,7 @@
 #include "mic.h"
 #include "imu.h"
 #include "bunny_clips.h"
+#include "voice.h"
 #include "se_services_port.h"
 #include "Driver_WDT.h"
 
@@ -92,6 +93,12 @@ extern int nn_forward(const float *in, int n_in, const float **out, int *n_out);
 volatile uint32_t g_bunny_nn_us, g_bunny_fps;  /* debugger-readable */
 volatile int32_t g_force_world = -1;
 volatile int32_t g_force_clip = -1;  /* debugger-writable: play this clip now (remote test) */
+volatile int32_t g_force_voice = -1; /* debugger-writable: act as if this word was heard (0 hop, 1 dance, 2 none) */
+
+/* push to talk: joystick A / B teach "hop" / "dance", centre = say a word */
+#define VOICE_TIMEOUT_S 2.5f
+#define RIDE_BLOCK_S    8.0f    /* after "hop" takes him off your shoulder: stay down this long */
+static const char *const voice_word[VOICE_WORDS] = {"HOP", "DANCE"};
 volatile int32_t g_test_doodle = 0;  /* debugger-writable: 1 star, 2 house, 3 smiley, 4 fish (remote test) */  /* debugger-writable: 1 = camera world, 0 = home (acts like a tap on the button) */
 
 #define SLOW_FRAME_MS   150     /* a frame slower than this prints its stage times */
@@ -1391,6 +1398,10 @@ void bunny_demo_loop(void)
     float face_seen_s = 0.0f, face_lost_s = 0.0f, sh_x = 0.0f, sh_y = 0.0f, ride_t = 0.0f;
     float jump_x0 = 0.0f, jump_y0 = 0.0f;
     int ride = 0;          /* 0 on the floor, 1 jumping up, 2 riding, 3 hopping down */
+    int vstate = 0;        /* voice: 0 off, 1 listening for a word, 2 + w teaching word w */
+    float vrec_t = 0.0f, ride_block_s = 0.0f;
+    int voice_act = -1;    /* heard: 0 hop, 1 dance, 2 none of them */
+    int voice_jump = 0;    /* "hop" in the camera world: onto / off the shoulder */
     int ride_side = 1;     /* which shoulder (screen side: -1 left, +1 right), locked at the jump */
     int glitches = 0;      /* detections rejected as jumps */
     face_t fs;             /* smoothed face */
@@ -1579,6 +1590,63 @@ void bunny_demo_loop(void)
         was_pressed = pressed;
         if (newly) any_input = 1;
         if (motion > IMU_WAKE_TH || loud) any_input = 1;
+        if (newly) printf("joy: pressed %s\n", (newly & 1u) ? "A" : (newly & 2u) ? "B" : (newly & 4u) ? "C" : (newly & 8u) ? "D" : "centre");
+
+        /* ---- voice: push to talk ---- */
+        if (vstate == 0 && mic_rc == 0 && (newly & (1u | 2u | 16u))) {
+            int teach = (newly & 1u) ? 0 : (newly & 2u) ? 1 : -1;
+            if (teach < 0 && voice_count(0) + voice_count(1) == 0) {
+                snprintf(bubble_text, sizeof(bubble_text), "TEACH ME FIRST");
+                bubble_t = 2.0f;
+                if (!cam_mode) fill_bg(0, 24, w, 100);
+            } else if (mic_record_start() == 0) {
+                vstate = teach < 0 ? 1 : 2 + teach;
+                vrec_t = 0.0f;
+                if (teach < 0) snprintf(bubble_text, sizeof(bubble_text), "LISTENING...");
+                else snprintf(bubble_text, sizeof(bubble_text), "SAY %s!", voice_word[teach]);
+                bubble_t = 1.6f;
+                if (!cam_mode) fill_bg(0, 24, w, 100);
+                printf("voice: %s\n", teach < 0 ? "listening" : "teaching");
+            }
+        }
+        if (vstate) {
+            const int16_t *pcm;
+            int npcm, r = mic_record_poll(&pcm, &npcm);
+            vrec_t += dt;
+            if (r == 1) {
+                uint32_t vt0 = DWT->CYCCNT;
+                int nfr = voice_features(pcm, npcm);
+                if (vstate >= 2) {  /* teaching */
+                    int word = vstate - 2;
+                    if (nfr > 0) {
+                        int c = voice_add_template(word);
+                        snprintf(bubble_text, sizeof(bubble_text), "GOT %s x%d", voice_word[word], c);
+                    } else {
+                        snprintf(bubble_text, sizeof(bubble_text), "DIDN'T HEAR");
+                    }
+                } else if (nfr == 0) {
+                    snprintf(bubble_text, sizeof(bubble_text), "DIDN'T HEAR");
+                } else {
+                    int m = voice_match();
+                    voice_act = m >= 0 ? m : 2;
+                    snprintf(bubble_text, sizeof(bubble_text), "%s", m >= 0 ? (m == 0 ? "HOP!" : "DANCE!") : "???");
+                }
+                printf("voice: %lu us\n", (unsigned long)((DWT->CYCCNT - vt0) / (SystemCoreClock / 1000000U)));
+                bubble_t = 1.6f;
+                if (!cam_mode) fill_bg(0, 24, w, 100);
+                vstate = 0;
+            } else if (r < 0 || vrec_t > VOICE_TIMEOUT_S) {
+                printf("voice: recording failed (%d)\n", r);
+                mic_record_cancel();
+                vstate = 0;
+            }
+            idle_s = 0.0f;
+        }
+        if (g_force_voice >= 0) { voice_act = g_force_voice; g_force_voice = -1; }
+        if (voice_act == 0 && cam_mode && (fs.ok || ride)) {  /* hop onto / off your shoulder */
+            voice_jump = 1;
+            voice_act = -1;
+        }
 
         /* ---- behaviour ---- */
         state_t_s += dt;
@@ -1605,12 +1673,13 @@ void bunny_demo_loop(void)
         } else {
             bunny_clip_t act = CLIP_COUNT;
             if (motion > IMU_SHAKE_TH) act = CLIP_DIZZY;
-            else if (newly & 1u) act = CLIP_WAVE;
-            else if (newly & 2u) act = CLIP_YAWN;
-            else if (newly & 4u) act = CLIP_HOP;
+            else if (voice_act == 0) act = CLIP_HOP;
+            else if (voice_act == 1) act = CLIP_DANCE;
+            else if (voice_act == 2) act = CLIP_CONFUSED;
+            else if (newly & 4u) act = CLIP_WAVE;
             else if (newly & 8u) act = CLIP_CLAP;
-            else if (newly & 16u) act = CLIP_EAT;
             else if (poked && on_bunny) act = CLIP_LOVE;
+            if (voice_act >= 0) { fun = clamp01(fun + 0.15f); voice_act = -1; }
             if (g_force_clip >= 0 && g_force_clip < CLIP_COUNT) { act = (bunny_clip_t)g_force_clip; g_force_clip = -1; }
 
             if (act == CLIP_LOVE) {  /* petted: affection, and maybe a lesson */
@@ -1647,7 +1716,7 @@ void bunny_demo_loop(void)
             if (act != CLIP_COUNT && !(act == clip && st == ST_ACTION)) {
                 st = ST_ACTION;
                 set_clip(act);
-                action_len = bunny_clip_duration(act) * (act == CLIP_HOP || act == CLIP_LOVE ? 1.0f : 1.5f);
+                action_len = bunny_clip_duration(act) * (act == CLIP_HOP || act == CLIP_LOVE || act == CLIP_DANCE ? 1.0f : 1.5f);
                 state_t_s = 0.0f;
             } else if (tap_run) {  /* run to where you tapped */
                 target_x = (float)touch_x - ar_off - (float)spr / 2.0f;
@@ -1823,7 +1892,11 @@ void bunny_demo_loop(void)
                 sh_y += (ty - sh_y) * a;
             }
             ride_t += dt;
-            if (ride == 0 && fs.ok && face_seen_s > FACE_STABLE_S && st != ST_LIE && st != ST_SLEEP) {
+            if (ride_block_s > 0.0f) ride_block_s -= dt;
+            if (ride == 0 && fs.ok && (voice_jump || (face_seen_s > FACE_STABLE_S && ride_block_s <= 0.0f)) &&
+                st != ST_LIE && st != ST_SLEEP) {
+                voice_jump = 0;
+                ride_block_s = 0.0f;
                 ride = 1;  /* jump! */
                 ride_t = 0.0f;
                 jump_x0 = bx;
@@ -1839,7 +1912,9 @@ void bunny_demo_loop(void)
                 set_clip(CLIP_SIT);
                 action_len = 1e9f;
                 state_t_s = 0.0f;
-            } else if (ride == 2 && face_lost_s > FACE_LOST_S) {
+            } else if (ride == 2 && (face_lost_s > FACE_LOST_S || voice_jump)) {
+                if (voice_jump) ride_block_s = RIDE_BLOCK_S;
+                voice_jump = 0;
                 ride = 3;  /* hop down */
                 ride_t = 0.0f;
                 jump_x0 = sh_x - (float)spr / 2.0f;
@@ -1854,8 +1929,16 @@ void bunny_demo_loop(void)
                 state_t_s = 0.0f;
             }
             if (ride == 2) idle_s = 0.0f;  /* no napping on a shoulder */
+            if (ride == 2 && st != ST_ACTION) {  /* an action (dance, wave) ended: sit back down */
+                st = ST_ACTION;
+                set_clip(CLIP_SIT);
+                action_len = 1e9f;
+                state_t_s = 0.0f;
+            }
+            if (ride == 1 || ride == 3) voice_jump = 0;
         } else if (ride || fs.ok) {
             ride = 0;
+            voice_jump = 0;
             face.ok = fs.ok = 0;
             face_seen_s = face_lost_s = 0.0f;
         }
