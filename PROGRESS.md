@@ -210,3 +210,11 @@ Branch `bunny` (from working-checkpoint 432c0e53). Kit + data in model/bunny/ (t
 - Camera is fine (earlier black frames: nothing in view / dark). Tested on Abdul: face 99%, "jumping onto the shoulder", riding; screenshot shows the bunny on the shoulder. Camera world 11 fps (home 20 fps).
 - Frames are never stored; detection only, no identification.
 - Shoulder ride v2: BlazeFace keypoints decoded (eyes/nose/mouth/ears) -> head roll; face smoothed (EMA 0.5) with glitch rejection (jump > 1.5 face sizes ignored unless it repeats); shoulder side locked at the jump (switches only if that shoulder leaves the screen); offsets 0.95 face widths out, 1.05 face heights down (1.35/1.15 floated past the shoulder). Gaze: in the camera world he looks at your face (look_x/look_y, head tilt); riding he copies your head tilt; very close = wide eyes. Camera world 12 fps.
+
+## Personality engine (Sat Oct 17, late night)
+- White halo fix: alpha matte (flood fill of near-white from the image border = background; edge pixels get partial alpha and the white un-mixed from their colour; background colour set dark so bilinear never mixes in white); sprite alpha-blended over camera / drawings / white.
+- Needs: energy (drains awake, faster when running/hopping; refills asleep), fun (drains when ignored; touches, doodles, faces in view raise it), affection (drains; petting +0.35, faces in view raise it), food (meter). Mood (valence) shows on the face during idle/look/sit/walk: happy eyes, sad eyes + droopy ears, sleepy eyes.
+- Choices: every 2.5-6 s the bunny scores 9 actions (walk, look, sit, hop, clap, wave = attention seeking, stretch, yawn, pout) from his needs x learned preference and samples one (softmax, temperature 0.22): not predictable, but fits his mood.
+- Learning: petting within 4 s after a spontaneous action multiplies its preference by 1.35 (max 3), bubble "MORE HOPS!" etc.; shaking within 4 s multiplies by 0.75. Status line prints the preferences.
+- Sleep: when energy < 12% (or idle 45 s with energy < 60%), walks home if there is a house; wakes by himself when rested (energy > 97%), or on any input.
+- Thoughts: when a need is low, a bubble "SLEEPY" / "PET ME?" / "BORED!" every 25-40 s.

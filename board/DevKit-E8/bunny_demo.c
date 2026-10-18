@@ -1231,6 +1231,50 @@ static void hatch(void)
            (int)identity[2], (int)(identity[3] * 100));
 }
 
+/* ---- personality: needs, mood, choices, learning -------------------------- */
+/* Instead of a timer, the bunny weighs what he could do against his needs
+ * (energy, fun, affection, food) and what he has learned you like, and picks
+ * at random in proportion: you cannot predict his next move, but it fits his
+ * mood. Petting him right after something he did on his own makes him do it
+ * more; shaking the board right after makes him do it less. */
+
+typedef enum { A_WANDER, A_LOOK, A_SIT, A_HOP, A_CLAP, A_WAVE, A_STRETCH, A_YAWN, A_POUT, A_COUNT } act_t;
+static const char *const act_more[A_COUNT] = {"MORE WALKS!", "MORE LOOKS!", "MORE SITS!", "MORE HOPS!", "MORE CLAPS!",
+                                              "MORE WAVES!", "MORE STRETCH!", "MORE YAWNS!", "MORE POUTS!"};
+static const char *const act_name[A_COUNT] = {"walk", "look", "sit", "hop", "clap", "wave", "stretch", "yawn", "pout"};
+static float pref[A_COUNT] = {1, 1, 1, 1, 1, 1, 1, 1, 1};  /* learned: how much you like each */
+
+#define LEARN_WINDOW_S  4.0f    /* pet within this after an action = you liked it */
+#define CHOICE_TEMP     0.22f   /* lower = more predictable                       */
+
+static float clamp01(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); }
+
+/* how attractive each action is right now (before learning) */
+static void act_utility(float *u, float energy, float fun, float affection, float hunger)
+{
+    float valence = clamp01(0.4f * affection + 0.35f * fun + 0.25f * hunger);
+    u[A_WANDER]  = 0.45f + 0.7f * (1.0f - fun) * energy;
+    u[A_LOOK]    = 0.35f + 0.3f * (1.0f - energy);
+    u[A_SIT]     = 0.20f + 0.8f * (1.0f - energy);
+    u[A_HOP]     = 0.05f + 1.0f * valence * energy;
+    u[A_CLAP]    = 0.03f + 0.7f * valence * energy;
+    u[A_WAVE]    = 0.03f + 1.1f * (1.0f - affection) * energy;   /* attention seeking */
+    u[A_STRETCH] = 0.05f + 0.4f * (1.0f - energy);
+    u[A_YAWN]    = 0.02f + 1.3f * (1.0f - energy) * (1.0f - energy);
+    u[A_POUT]    = 0.01f + 1.2f * clamp01(0.45f - valence) * 2.0f;
+}
+
+static act_t choose_action(float energy, float fun, float affection, float hunger)
+{
+    float u[A_COUNT], w[A_COUNT], sum = 0.0f, mx = 0.0f;
+    act_utility(u, energy, fun, affection, hunger);
+    for (int i = 0; i < A_COUNT; ++i) { u[i] *= pref[i]; if (u[i] > mx) mx = u[i]; }
+    for (int i = 0; i < A_COUNT; ++i) { w[i] = expf((u[i] - mx) / CHOICE_TEMP); sum += w[i]; }
+    float r = frand(0.0f, sum);
+    for (int i = 0; i < A_COUNT; ++i) { r -= w[i]; if (r <= 0.0f) return (act_t)i; }
+    return A_LOOK;
+}
+
 /* ---- main loop --------------------------------------------------------- */
 
 void bunny_demo_loop(void)
@@ -1319,6 +1363,9 @@ void bunny_demo_loop(void)
     float hunger = 0.8f, hungry_nag = 0.0f;
     int pending_obj = -1, eat_obj = -1, go_sleep = 0, flee_after = 0;
     bunny_clip_t pending_clip = CLIP_COUNT;
+    /* personality */
+    float energy = 0.9f, fun = 0.6f, affection = 0.5f, thought_cd = 25.0f, spont_t = 99.0f;
+    int last_spont = -1;
     /* camera world: face -> shoulder ride */
     face_t face = {0, 0, 0, 0, 0, 0};
     float face_seen_s = 0.0f, face_lost_s = 0.0f, sh_x = 0.0f, sh_y = 0.0f, ride_t = 0.0f;
@@ -1522,6 +1569,13 @@ void bunny_demo_loop(void)
                 st = ST_SLEEP;
                 set_clip(CLIP_SLEEP);
                 blend_t = BLEND_S;  /* lie_down ends where sleep starts */
+            } else if (st == ST_SLEEP && energy > 0.97f) {  /* slept enough: wakes up by himself */
+                st = ST_ACTION;
+                set_clip(CLIP_STRETCH);
+                action_len = bunny_clip_duration(CLIP_STRETCH);
+                state_t_s = 0.0f;
+                idle_s = 0.0f;
+                printf("bunny: woke up rested\n");
             }
         } else {
             bunny_clip_t act = CLIP_COUNT;
@@ -1532,6 +1586,25 @@ void bunny_demo_loop(void)
             else if (newly & 8u) act = CLIP_CLAP;
             else if (newly & 16u) act = CLIP_EAT;
             else if (poked && on_bunny) act = CLIP_LOVE;
+
+            if (act == CLIP_LOVE) {  /* petted: affection, and maybe a lesson */
+                affection = clamp01(affection + 0.35f);
+                fun = clamp01(fun + 0.15f);
+                if (last_spont >= 0 && spont_t < LEARN_WINDOW_S) {
+                    pref[last_spont] = pref[last_spont] * 1.35f > 3.0f ? 3.0f : pref[last_spont] * 1.35f;
+                    printf("bunny: learned you like it when I %s (x%d.%d)\n", act_name[last_spont],
+                           (int)pref[last_spont], (int)(pref[last_spont] * 10.0f) % 10);
+                    snprintf(bubble_text, sizeof(bubble_text), "%s", act_more[last_spont]);
+                    if (!cam_mode) fill_bg(0, 24, w, 100);
+                    bubble_t = 2.0f;
+                    last_spont = -1;
+                }
+            } else if (act == CLIP_DIZZY && last_spont >= 0 && spont_t < LEARN_WINDOW_S) {
+                pref[last_spont] *= 0.75f;  /* shaken right after: do that less */
+                if (pref[last_spont] < 0.3f) pref[last_spont] = 0.3f;
+                printf("bunny: learned you don't like it when I %s\n", act_name[last_spont]);
+                last_spont = -1;
+            }
 
             if (touching && on_bunny) {
                 hold_s += dt;
@@ -1624,7 +1697,7 @@ void bunny_demo_loop(void)
             }
             case ST_IDLE:
             default:
-                if (idle_s > SLEEP_AFTER_S) {
+                if (energy < 0.12f || (idle_s > 45.0f && energy < 0.6f)) {  /* tired: go to sleep */
                     int hk = world_find(C_HOUSE);
                     if (hk >= 0 && !go_sleep && fabsf(objs[hk].x - (bx + (float)spr / 2.0f)) > 50.0f) {
                         go_sleep = 1;  /* walk home first */
@@ -1651,17 +1724,31 @@ void bunny_demo_loop(void)
                     set_clip(CLIP_SAD);
                     action_len = 3.0f;
                     state_t_s = 0.0f;
+                } else if (thought_cd <= 0.0f && bubble_t <= 0.0f &&
+                           (energy < 0.3f || fun < 0.25f || affection < 0.2f)) {
+                    /* a thought about what he needs */
+                    thought_cd = frand(25.0f, 40.0f);
+                    snprintf(bubble_text, sizeof(bubble_text), "%s",
+                             energy < 0.3f ? "SLEEPY" : (affection < 0.2f ? "PET ME?" : "BORED!"));
+                    if (!cam_mode) fill_bg(0, 24, w, 100);
+                    bubble_t = 2.2f;
                 } else if (state_t_s > next_decision) {
-                    float r = frand(0.0f, 1.0f);
+                    act_t a = choose_action(energy, fun, affection, hunger);
+                    static const bunny_clip_t act_clip[A_COUNT] = {CLIP_WALK, CLIP_LOOK, CLIP_SIT, CLIP_HOP, CLIP_CLAP,
+                                                                   CLIP_WAVE, CLIP_STRETCH, CLIP_YAWN, CLIP_SAD};
                     state_t_s = 0.0f;
-                    next_decision = frand(3.0f, 6.0f);
-                    if (r < 0.55f) {
+                    next_decision = frand(2.5f, 6.0f);
+                    last_spont = a;
+                    spont_t = 0.0f;
+                    if (a == A_WANDER) {
                         target_x = frand(x_min, x_max);
                         st = ST_WANDER;
-                    } else if (r < 0.8f) {
-                        set_clip(CLIP_LOOK);
+                    } else if (a == A_LOOK || a == A_SIT) {
+                        set_clip(act_clip[a]);  /* stays idle, just looks around / sits */
                     } else {
-                        set_clip(r < 0.9f ? CLIP_SIT : CLIP_IDLE);
+                        st = ST_ACTION;
+                        set_clip(act_clip[a]);
+                        action_len = bunny_clip_duration(act_clip[a]);
                     }
                 }
                 break;
@@ -1748,6 +1835,13 @@ void bunny_demo_loop(void)
         }
         gaze += ((cam_mode && fs.ok ? 1.0f : 0.0f) - gaze) * (dt * 4.0f > 1.0f ? 1.0f : dt * 4.0f);
         if (st != ST_SLEEP) hunger -= dt / HUNGER_S;
+        /* needs drift */
+        if (st == ST_SLEEP || st == ST_LIE) energy = clamp01(energy + dt / 40.0f);
+        else energy = clamp01(energy - dt / ((clip == CLIP_RUN || clip == CLIP_HOP) ? 120.0f : 300.0f));
+        fun = clamp01(fun - dt / 90.0f + (any_input ? 0.05f : 0.0f) + (cam_mode && fs.ok ? dt / 40.0f : 0.0f));
+        affection = clamp01(affection - dt / 150.0f + (cam_mode && fs.ok ? dt / 80.0f : 0.0f));
+        if (thought_cd > 0.0f) thought_cd -= dt;
+        spont_t += dt;
         if (hunger < 0.0f) hunger = 0.0f;
         if (hungry_nag > 0.0f) hungry_nag -= dt;
 
@@ -1807,6 +1901,7 @@ void bunny_demo_loop(void)
                 for (int i = 0; i < 8; ++i) sum += expf(sc8[i] - mx);
                 float pbest = 1.0f / sum;
                 printf("doodle: %s %d%% (%lu us)\n", doodle_names[best], (int)(pbest * 100.0f), (unsigned long)dus);
+                fun = clamp01(fun + 0.25f);
                 bunny_clip_t react = pbest >= DOODLE_MIN_P ? doodle_react[best] : CLIP_CONFUSED;
                 if (pbest >= DOODLE_MIN_P) {
                     snprintf(bubble_text, sizeof(bubble_text), "%s!", doodle_names[best]);
@@ -1913,6 +2008,17 @@ void bunny_demo_loop(void)
             for (int i = D_EYE_OPEN; i <= D_EYE_SAD; ++i) target.d[i] *= 1.0f - 0.8f * p;
             target.d[D_EYE_WIDE] += 0.8f * p;
             target.d[D_LOOK_Y] = -3.0f * p;
+        }
+        if (clip == CLIP_IDLE || clip == CLIP_LOOK || clip == CLIP_SIT || clip == CLIP_WALK) {
+            /* mood shows on his face while he is not busy with something else */
+            float valence = clamp01(0.4f * affection + 0.35f * fun + 0.25f * hunger);
+            float happy = clamp01((valence - 0.65f) * 3.0f) * 0.35f, sad = clamp01((0.35f - valence) * 3.0f) * 0.4f;
+            float sleepy = clamp01((0.3f - energy) * 3.0f) * 0.45f;
+            for (int i = D_EYE_OPEN; i <= D_EYE_SAD; ++i) target.d[i] *= 1.0f - happy - sad - sleepy;
+            target.d[D_EYE_HAPPY] += happy;
+            target.d[D_EYE_SAD] += sad;
+            target.d[D_EYE_SLEEP] += sleepy;
+            if (sad > 0.0f || sleepy > 0.0f) target.d[D_CURL] += 30.0f * (sad + sleepy);  /* droopy ears */
         }
         if (gaze > 0.01f && fs.ok) {
             /* he looks at your face; on your shoulder he copies your head tilt; lean in close and he is surprised */
@@ -2048,6 +2154,10 @@ void bunny_demo_loop(void)
             nn_us_acc = 0;
             if (cam_mode) printf("face: %s score %d%% at %d,%d size %d roll %d, detect %lu us, ride %d side %d\n", fs.ok ? "yes" : "no",
                                  (int)(fs.score * 100.0f), (int)fs.x, (int)fs.y, (int)fs.w, (int)fs.roll, (unsigned long)face_us, ride, ride_side);
+            printf("mood: energy %d fun %d love %d food %d | likes walk %d look %d sit %d hop %d clap %d wave %d\n",
+                   (int)(energy * 100), (int)(fun * 100), (int)(affection * 100), (int)(hunger * 100),
+                   (int)(pref[A_WANDER] * 10), (int)(pref[A_LOOK] * 10), (int)(pref[A_SIT] * 10), (int)(pref[A_HOP] * 10),
+                   (int)(pref[A_CLAP] * 10), (int)(pref[A_WAVE] * 10));
             printf("bunny: [%s] %lu fps, NN %lu us, state %s, clip %s, imu %d, mic %d dB, stack %lu B\n",
                    cam_mode ? "camera" : "home", (unsigned long)g_bunny_fps, (unsigned long)g_bunny_nn_us, state_names[st],
                    bunny_clip_name(clip), (int)motion, (int)graph_db[GRAPH_N - 1], (unsigned long)stack_used());
