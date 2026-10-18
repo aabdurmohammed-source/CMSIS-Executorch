@@ -25,6 +25,7 @@ Everything runs on the board. No cloud, no host PC, no camera frames stored.
 > Arm + Meta ExecuTorch Edge AI Hackathon, SFSU, October 17-18 2026.
 > Team: Abdul Mohammed and Awab Ibrahim.
 > Judged version: tag **`v1.2-demo`** (the tag points at the exact commit used in the demo).
+> Slides: [presentation/Alfy-presentation.pptx](presentation/Alfy-presentation.pptx).
 
 ---
 
@@ -377,6 +378,7 @@ ai_layer/             generated AI layer with the bunny decoder program
 model/                PyTorch models, datasets and training / export scripts (bunny, doodle, blazeface, kws)
 create_ai_layer.py    PyTorch -> ExecuTorch (PT2E quantisation, Ethos-U partitioner, Vela) -> AI layer
 tools/                flash_se.sh (flash via the Secure Enclave), u55_test (the second NPU test)
+presentation/         the pitch deck (PowerPoint)
 ```
 
 ## 9. Design decisions
