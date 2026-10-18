@@ -27,6 +27,9 @@
 #define PAD_FR      4       /* frames kept before / after the speech */
 #define SKIP_FR     6       /* the joystick click at the start */
 #define MIN_SPEECH  12      /* frames: shorter than 120 ms is not a word */
+#define WORD_DB     20.0f   /* the word = frames within this of its loudest frame, */
+#define GAP_FR      12      /* joined across quiet gaps up to 120 ms ("dan-ce"),   */
+#define MAX_WORD    80      /* at most 800 ms: chatter before / after is cut off  */
 #define REJECT_K    1.6f    /* reject if farther than this x the word's own spread, */
 #define REJECT_MIN  4.0f    /* but never stricter than this                         */
 #define REJECT_MAX  6.0f    /* or looser than this (checked with Windows TTS words)  */
@@ -146,13 +149,14 @@ int voice_features(const int16_t *pcm, int n)
     float lo[32];
     int nlo = 0;
     float peak = -1e9f;
+    int pk = SKIP_FR;
     for (int f = 0; f < nf; ++f) {
         const int16_t *x = pcm + f * HOP;
         float e = 0.0f;
         for (int i = 0; i < FRAME; ++i) { float v = (float)x[i] - mean; e += v * v; }
         fr_db[f] = 10.0f * log10f(e / FRAME + 1.0f);
         if (f < SKIP_FR) continue;
-        if (fr_db[f] > peak) peak = fr_db[f];
+        if (fr_db[f] > peak) { peak = fr_db[f]; pk = f; }
         /* keep the 32 quietest */
         if (nlo < 32) lo[nlo++] = fr_db[f];
         else {
@@ -168,10 +172,20 @@ int voice_features(const int16_t *pcm, int n)
         printf("voice: nothing heard (peak %d dB over the floor)\n", (int)(peak - floor_db));
         return 0;
     }
+    /* grow out from the loudest frame: only the burst around it is the word
+     * (in a noisy room, voices before / after are quieter than your word) */
     float thr = floor_db + 0.3f * (peak - floor_db);
-    int s = -1, e = -1;
-    for (int f = SKIP_FR; f < nf; ++f) {
-        if (fr_db[f] > thr) { if (s < 0) s = f; e = f; }
+    if (thr < peak - WORD_DB) thr = peak - WORD_DB;
+    int s = pk, e = pk;
+    for (int f = pk - 1, gap = 0; f >= SKIP_FR && gap <= GAP_FR; --f) {
+        if (fr_db[f] > thr) { s = f; gap = 0; } else ++gap;
+    }
+    for (int f = pk + 1, gap = 0; f < nf && gap <= GAP_FR; ++f) {
+        if (fr_db[f] > thr) { e = f; gap = 0; } else ++gap;
+    }
+    if (e - s + 1 > MAX_WORD) {  /* keep MAX_WORD frames around the peak */
+        s = pk - MAX_WORD / 3 < s ? s : pk - MAX_WORD / 3;
+        e = s + MAX_WORD - 1;
     }
     if (e - s + 1 < MIN_SPEECH) {
         printf("voice: too short (%d frames)\n", e - s + 1);

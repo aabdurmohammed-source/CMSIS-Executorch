@@ -95,10 +95,10 @@ volatile int32_t g_force_world = -1;
 volatile int32_t g_force_clip = -1;  /* debugger-writable: play this clip now (remote test) */
 volatile int32_t g_force_voice = -1; /* debugger-writable: act as if this word was heard (0 hop, 1 dance, 2 none) */
 
-/* push to talk: joystick A / B teach "hop" / "dance", centre = say a word */
+/* push to talk: joystick A / B teach "jump" / "dance", centre = say a word */
 #define VOICE_TIMEOUT_S 2.5f
 #define RIDE_BLOCK_S    8.0f    /* after "hop" takes him off your shoulder: stay down this long */
-static const char *const voice_word[VOICE_WORDS] = {"HOP", "DANCE"};
+static const char *const voice_word[VOICE_WORDS] = {"JUMP", "DANCE"};
 volatile int32_t g_test_doodle = 0;  /* debugger-writable: 1 star, 2 house, 3 smiley, 4 fish (remote test) */  /* debugger-writable: 1 = camera world, 0 = home (acts like a tap on the button) */
 
 #define SLOW_FRAME_MS   150     /* a frame slower than this prints its stage times */
@@ -1629,7 +1629,7 @@ void bunny_demo_loop(void)
                 } else {
                     int m = voice_match();
                     voice_act = m >= 0 ? m : 2;
-                    snprintf(bubble_text, sizeof(bubble_text), "%s", m >= 0 ? (m == 0 ? "HOP!" : "DANCE!") : "???");
+                    snprintf(bubble_text, sizeof(bubble_text), "%s", m >= 0 ? (m == 0 ? "JUMP!" : "DANCE!") : "???");
                 }
                 printf("voice: %lu us\n", (unsigned long)((DWT->CYCCNT - vt0) / (SystemCoreClock / 1000000U)));
                 bubble_t = 1.6f;

@@ -10,7 +10,7 @@ extern "C" {
 /* Few-shot keyword spotting: MFCC features + DTW against templates you teach
  * by saying each word a few times. */
 
-#define VOICE_WORDS       2     /* 0 = hop, 1 = dance */
+#define VOICE_WORDS       2     /* 0 = jump, 1 = dance */
 #define VOICE_TEMPLATES   6     /* recordings kept per word (newest replace oldest): two people x 3 */
 #define VOICE_MAX_FRAMES  120   /* 1.2 s of speech */
 
