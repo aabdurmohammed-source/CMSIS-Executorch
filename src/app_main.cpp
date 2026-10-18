@@ -178,6 +178,43 @@ EmbeddedModule* g_face = nullptr;
 Tensor* g_face_tensor = nullptr;
 }  // namespace
 
+// Fourth program: the keyword spotter (board/DevKit-E8/kws_pte.c, model/kws/export_kws.py).
+// Also shares the bunny's NPU scratch pool.
+extern "C" const unsigned char kws_pte[];
+extern "C" const unsigned long kws_pte_size;
+namespace {
+constexpr size_t kKwsIn = 49 * 40;
+alignas(16) uint8_t g_kws_method_pool[48 * 1024] APP_POOL_ATTRIBUTES;
+alignas(16) float g_kws_in[kKwsIn];
+EmbeddedModule* g_kws = nullptr;
+Tensor* g_kws_tensor = nullptr;
+}  // namespace
+
+// Classifies 49 x 40 log-mel features (see model/kws/kws_features.py); writes up
+// to n class logits. Returns the number written, or < 0.
+extern "C" int kws_classify(const float* in, float* scores, int n) {
+  if (g_kws == nullptr || g_kws_tensor == nullptr) {
+    return -1;
+  }
+  for (size_t i = 0; i < kKwsIn; ++i) {
+    g_kws_in[i] = in[i];
+  }
+  auto outputs = g_kws->forward(*g_kws_tensor);
+  if (!outputs.ok() || outputs->empty() || !outputs->front().isTensor()) {
+    return -2;
+  }
+  Tensor t = outputs->front().toTensor();
+  if (t.scalar_type() != ScalarType::Float) {
+    return -3;
+  }
+  const float* p = t.const_data_ptr<float>();
+  int k = static_cast<int>(t.numel()) < n ? static_cast<int>(t.numel()) : n;
+  for (int i = 0; i < k; ++i) {
+    scores[i] = p[i];
+  }
+  return k;
+}
+
 // The face detector's input: 3 x 128 x 128 floats (RGB planes, -1..1). Fill it, then face_detect().
 extern "C" float* face_input(void) {
   return g_face_in;
@@ -431,6 +468,37 @@ extern "C" int app_main(void) {
     fr = face_detect(&fo);
     us = (DWT->CYCCNT - c0) / (SystemCoreClock / 1000000u);
     printf("face: detect %lu us on " NPU_NAME "\n", (unsigned long)us);
+
+    // Keyword spotter, SRAM copy, scratch shared with the bunny
+    static uint8_t g_kws_sram[96 * 1024] __attribute__((aligned(16))) APP_POOL_ATTRIBUTES;
+    const unsigned char* kpte = kws_pte;
+    if (kws_pte_size <= sizeof(g_kws_sram)) {
+      memcpy(g_kws_sram, kws_pte, kws_pte_size);
+      SCB_CleanDCache_by_Addr(reinterpret_cast<uint32_t*>(g_kws_sram), static_cast<int32_t>(kws_pte_size));
+      kpte = g_kws_sram;
+    } else {
+      printf("kws: model (%lu bytes) does not fit its SRAM copy\n", kws_pte_size);
+    }
+    static EmbeddedModule kws(
+        kpte, kws_pte_size,
+        std::make_unique<BufferDataLoader>(kpte, kws_pte_size),
+        std::make_unique<MemoryAllocator>(sizeof(g_kws_method_pool), g_kws_method_pool),
+        std::make_unique<MemoryAllocator>(kTempPoolSize, g_temp_pool));
+    static std::array<SizesType, 4> ksizes{1, 1, 49, 40};
+    static std::array<DimOrderType, 4> korder{0, 1, 2, 3};
+    static TensorImpl kimpl(ScalarType::Float, 4, ksizes.data(), g_kws_in, korder.data());
+    static Tensor ktensor(&kimpl);
+    g_kws = &kws;
+    g_kws_tensor = &ktensor;
+    float ks[16];
+    c0 = DWT->CYCCNT;
+    int nk = kws_classify(g_kws_in, ks, 16);
+    us = (DWT->CYCCNT - c0) / (SystemCoreClock / 1000000u);
+    printf("kws: %lu byte model, test run -> %d classes, %lu us (first run)\n", kws_pte_size, nk, (unsigned long)us);
+    c0 = DWT->CYCCNT;
+    nk = kws_classify(g_kws_in, ks, 16);
+    us = (DWT->CYCCNT - c0) / (SystemCoreClock / 1000000u);
+    printf("kws: classify %lu us on " NPU_NAME "\n", (unsigned long)us);
   }
   bunny_demo_loop();
 #else

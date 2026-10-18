@@ -7,26 +7,19 @@
 extern "C" {
 #endif
 
-/* Few-shot keyword spotting: MFCC features + DTW against templates you teach
- * by saying each word a few times. */
+/* Keyword spotting on the Ethos-U85 (Google Speech Commands words, any voice). */
 
-#define VOICE_WORDS       2     /* 0 = jump, 1 = dance */
-#define VOICE_TEMPLATES   6     /* recordings kept per word (newest replace oldest): two people x 3 */
-#define VOICE_MAX_FRAMES  120   /* 1.2 s of speech */
+enum {
+    KWS_UP, KWS_DOWN, KWS_LEFT, KWS_RIGHT, KWS_GO, KWS_STOP, KWS_YES, KWS_NO, KWS_HAPPY,
+    KWS_SILENCE, KWS_UNKNOWN, KWS_N_CLASSES
+};
 
-/* Finds the speech in 8 kHz mono samples and computes its features.
- * Returns the number of 10 ms frames of speech, 0 if nothing was said. */
-int voice_features(const int16_t *pcm, int n);
+/* Finds the word in 8 kHz mono samples (at least 1 s) and classifies it.
+ * Returns a KWS_ class (KWS_SILENCE if nothing was said, -1 on error);
+ * *conf = its probability. */
+int voice_listen(const int16_t *pcm, int n, float *conf);
 
-/* Stores the last features as a template of word. Returns its template count. */
-int voice_add_template(int word);
-
-/* Templates taught for word so far */
-int voice_count(int word);
-
-/* Compares the last features with the templates: the word, -1 if nothing is
- * taught (or nothing was heard), -2 if it sounded like none of the words. */
-int voice_match(void);
+const char *voice_class_name(int c);
 
 #ifdef __cplusplus
 }
