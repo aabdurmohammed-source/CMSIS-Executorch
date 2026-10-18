@@ -16,6 +16,12 @@ int camera_capture(void);
 
 uint32_t camera_last_events(void);
 
+/* Non-blocking snapshot: start (0 = started, 1 = one already running),
+ * poll (1 = a new frame is in camera_frame()), abort. */
+int camera_capture_start(void);
+int camera_capture_poll(void);
+void camera_capture_abort(void);
+
 /* RGB565 frame, width x height pixels, 2 bytes each */
 const uint8_t *camera_frame(void);
 int camera_width(void);

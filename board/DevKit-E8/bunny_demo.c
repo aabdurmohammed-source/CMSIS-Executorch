@@ -78,8 +78,18 @@ extern int nn_forward(const float *in, int n_in, const float **out, int *n_out);
 #define COLD_START_MS   1000    /* let the panel power up before the display init */
 #define GROUND_Y        690     /* sprite bottom on screen                    */
 #define GRAPH_Y0        700     /* mic graph strip                            */
+#define ICON_W          84      /* world-switch button, bottom-right corner   */
+#define SPRITE_CAM_PX   224     /* bunny size in the camera world (~half)     */
+#define KEY_WHITE       226     /* camera world: sprite pixels brighter than this are see-through */
+#define AR_AXIS         1       /* gyro axis (0 x, 1 y, 2 z) for turning the board left/right */
+#define AR_SIGN         (-1.0f) /* flip if the bunny moves the wrong way when the board turns */
+#define AR_PX_PER_DEG   6.0f    /* screen px per degree of turn (~80 deg camera view) */
+#define AR_DEADBAND     3.0f    /* deg/s of gyro noise to ignore              */
+#define AR_MAX          170.0f  /* px the anchor may drift                    */
+#define AR_RETURN       0.5f    /* 1/s: drift back to the middle when still   */
 
 volatile uint32_t g_bunny_nn_us, g_bunny_fps;  /* debugger-readable */
+volatile int32_t g_force_world = -1;  /* debugger-writable: 1 = camera world, 0 = home (acts like a tap on the button) */
 
 #define SLOW_FRAME_MS   150     /* a frame slower than this prints its stage times */
 #define IMU_EVERY       3       /* read the IMU every Nth frame                     */
@@ -375,33 +385,65 @@ static void convert_output(const float *out)
 }
 
 /* Bilinear scale src_rgb to spr x spr at (ox, oy), mirrored if flip */
-static void draw_sprite(int ox, int oy, int flip)
+/* One screen row of the sprite: row y (0..spr-1) of the scaled sprite at (ox, oy) */
+static void draw_sprite_row(int ox, int oy, int flip, int key, int y)
 {
     uint8_t *fb = display_buffer();
     int w = display_width(), h = display_height(), bpp = display_bytes_per_pixel();
     static uint8_t vrow[MAX_NN * 3];
-    /* visible x range of the sprite */
+    int sy = oy + y;
+    if (y < 0 || y >= spr || sy < 0 || sy >= h) return;
     int x_lo = ox < 0 ? -ox : 0, x_hi = ox + spr > w ? w - ox : spr;
-    for (int y = 0; y < spr; ++y) {
-        int sy = oy + y;
-        if (sy < 0 || sy >= h) continue;
-        /* vertical blend once per row, then only the horizontal blend per pixel */
-        const uint8_t *r0 = src_rgb + (size_t)tab_i0[y] * nn_side * 3;
-        const uint8_t *r1 = r0 + nn_side * 3;
-        uint32_t wy = tab_w[y], wy0 = 256 - wy;
-        for (int k = 0; k < nn_side * 3; ++k) {
-            vrow[k] = (uint8_t)((r0[k] * wy0 + r1[k] * wy) >> 8);
+    /* vertical blend once per row, then only the horizontal blend per pixel */
+    const uint8_t *r0 = src_rgb + (size_t)tab_i0[y] * nn_side * 3;
+    const uint8_t *r1 = r0 + nn_side * 3;
+    uint32_t wy = tab_w[y], wy0 = 256 - wy;
+    for (int k = 0; k < nn_side * 3; ++k) {
+        vrow[k] = (uint8_t)((r0[k] * wy0 + r1[k] * wy) >> 8);
+    }
+    uint8_t *row = fb + (size_t)sy * (size_t)w * (size_t)bpp;
+    for (int x = x_lo; x < x_hi; ++x) {
+        int src_x = flip ? spr - 1 - x : x;
+        const uint8_t *v = vrow + tab_i0[src_x] * 3;
+        uint32_t wx = tab_w[src_x], wx0 = 256 - wx;
+        uint8_t r = (uint8_t)((v[0] * wx0 + v[3] * wx) >> 8);
+        uint8_t g = (uint8_t)((v[1] * wx0 + v[4] * wx) >> 8);
+        uint8_t b = (uint8_t)((v[2] * wx0 + v[5] * wx) >> 8);
+        if (key && r > KEY_WHITE && g > KEY_WHITE && b > KEY_WHITE) continue;  /* see-through */
+        write_px(row + (size_t)(ox + x) * (size_t)bpp, bpp, r, g, b);
+    }
+}
+
+static void draw_sprite(int ox, int oy, int flip, int key)
+{
+    for (int y = 0; y < spr; ++y) draw_sprite_row(ox, oy, flip, key, y);
+}
+
+/* Camera world background: the 640x480 frame scaled to fill the screen above
+ * the graph strip (height-fit, centre-cropped left and right). */
+static void draw_camera_bg(int w, int y1, int sox, int soy, int sflip)
+{
+    static uint16_t cam_x[480];
+    static int ready;
+    const uint8_t *cam = camera_frame();
+    int cw = camera_width(), ch = camera_height();
+    if (!ready) {
+        int vis_w = (w * ch) / y1;  /* source columns that fit the screen width */
+        if (vis_w > cw) vis_w = cw;
+        for (int x = 0; x < w && x < 480; ++x) cam_x[x] = (uint16_t)((cw - vis_w) / 2 + x * vis_w / w);
+        ready = 1;
+    }
+    uint8_t *fb = display_buffer();
+    int bpp = display_bytes_per_pixel();
+    for (int y = 0; y < y1; ++y) {
+        const uint8_t *src = cam + (size_t)(y * ch / y1) * (size_t)cw * 2;
+        uint8_t *p = fb + (size_t)y * (size_t)w * (size_t)bpp;
+        for (int x = 0; x < w; ++x, p += bpp) {
+            const uint8_t *q = src + (size_t)cam_x[x] * 2;
+            uint16_t v = (uint16_t)(q[0] | (q[1] << 8));
+            write_px(p, bpp, (uint8_t)((v >> 11) << 3), (uint8_t)(((v >> 5) & 0x3F) << 2), (uint8_t)((v & 0x1F) << 3));
         }
-        uint8_t *row = fb + (size_t)sy * (size_t)w * (size_t)bpp;
-        for (int x = x_lo; x < x_hi; ++x) {
-            int src_x = flip ? spr - 1 - x : x;
-            const uint8_t *v = vrow + tab_i0[src_x] * 3;
-            uint32_t wx = tab_w[src_x], wx0 = 256 - wx;
-            uint8_t r = (uint8_t)((v[0] * wx0 + v[3] * wx) >> 8);
-            uint8_t g = (uint8_t)((v[1] * wx0 + v[4] * wx) >> 8);
-            uint8_t b = (uint8_t)((v[2] * wx0 + v[5] * wx) >> 8);
-            write_px(row + (size_t)(ox + x) * (size_t)bpp, bpp, r, g, b);
-        }
+        draw_sprite_row(sox, soy, sflip, 1, y - soy);
     }
 }
 
@@ -458,6 +500,25 @@ static void draw_effects(const bunny_pose_t *p, int ox, int oy, int flip)
 
 #define GRAPH_N 80
 static float graph_db[GRAPH_N];
+
+/* World-switch button: a camera in the bunny's home, a house in the camera world */
+static void draw_icon(int cam_mode, int w, int h)
+{
+    int x0 = w - ICON_W, y0 = GRAPH_Y0;
+    fill_rect(x0, y0, w, h, 120, 80, 200);
+    int cx = x0 + ICON_W / 2, cy = y0 + (h - y0) / 2;
+    if (!cam_mode) {
+        fill_rect(cx - 24, cy - 14, cx + 24, cy + 18, 255, 255, 255);  /* body */
+        fill_rect(cx - 10, cy - 21, cx + 6, cy - 14, 255, 255, 255);   /* top */
+        fill_circle(cx, cy + 2, 12, 120, 80, 200);                     /* lens ring */
+        fill_circle(cx, cy + 2, 7, 255, 255, 255);
+        fill_circle(cx, cy + 2, 4, 70, 40, 95);
+    } else {
+        for (int i = 0; i < 20; ++i) fill_rect(cx - i - 2, cy - 22 + i, cx + i + 2, cy - 21 + i, 255, 255, 255);  /* roof */
+        fill_rect(cx - 17, cy - 2, cx + 17, cy + 22, 255, 255, 255);  /* walls */
+        fill_rect(cx - 5, cy + 8, cx + 5, cy + 22, 120, 80, 200);     /* door */
+    }
+}
 
 static void draw_graph(int w, int h)
 {
@@ -567,9 +628,12 @@ void bunny_demo_loop(void)
         printf("bunny: unexpected output size %d\n", n_out);
         for (;;) {}
     }
-    spr = (SPRITE_PX / nn_side) * nn_side;
-    if (spr > MAX_SPR) spr = MAX_SPR;
+    int spr_home = (SPRITE_PX / nn_side) * nn_side;
+    if (spr_home > MAX_SPR) spr_home = MAX_SPR;
+    spr = spr_home;
     build_tables();
+    int cam_mode = 0;
+    float ar_off = 0.0f;  /* camera world: px the bunny is shifted to stay put when the board turns */
     printf("bunny: NN draws %dx%d, shown at %dx%d\n", nn_side, nn_side, spr, spr);
 
     state_t st = ST_IDLE;
@@ -596,6 +660,10 @@ void bunny_demo_loop(void)
     printf("bunny: watchdog %d ms -> %d\n", WATCHDOG_MS, wdt_rc);
     printf("bunny: running\n");
     for (;;) {
+        /* Keep the cycle counter running: all timing and timeouts use it, and a
+         * debugger disconnect can switch the trace unit (and the counter) off. */
+        DCB->DEMCR |= DCB_DEMCR_TRCENA_Msk;
+        DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
         uint32_t now = DWT->CYCCNT;
         float dt = (float)(now - t_prev) / (float)SystemCoreClock;
         t_prev = now;
@@ -635,8 +703,47 @@ void bunny_demo_loop(void)
                 touching = 0;  /* finger lifted */
             }
         }
+        if (g_force_world >= 0) {  /* remote test: press the button */
+            if (g_force_world != cam_mode) {
+                poked = 1;
+                touch_x = w - 10;
+                touch_y = h - 10;
+            }
+            g_force_world = -1;
+        }
+        /* world-switch button */
+        if (poked && touch_x >= w - ICON_W && touch_y >= GRAPH_Y0) {
+            poked = 0;
+            if (camera_rc == 0 || cam_mode) {
+                cam_mode = !cam_mode;
+                if (cam_mode) {
+                    camera_capture_start();
+                } else {
+                    camera_capture_abort();
+                }
+                float centre = bx + (float)spr / 2.0f;
+                spr = cam_mode ? SPRITE_CAM_PX : spr_home;
+                build_tables();
+                bx = centre - (float)spr / 2.0f;
+                target_x = bx;
+                x_min = -EDGE_FRAC * (float)spr;
+                x_max = (float)(w - spr) + EDGE_FRAC * (float)spr;
+                ar_off = 0.0f;
+                if (!cam_mode) fill_rect(0, 0, w, GRAPH_Y0, 255, 255, 255);
+                prev = (rect_t){0, 0, 0, 0};
+                prev_dot = (rect_t){0, 0, 0, 0};
+                printf("bunny: world -> %s\n", cam_mode ? "camera" : "home");
+                st = ST_ACTION;  /* a happy hop to arrive */
+                set_clip(CLIP_HOP);
+                action_len = bunny_clip_duration(CLIP_HOP);
+                state_t_s = 0.0f;
+                idle_s = 0.0f;
+            }
+        }
+        if (touching && touch_x >= w - ICON_W && touch_y >= GRAPH_Y0) poked = 0;
         /* hit box: the middle of the sprite square, where the bunny is drawn */
-        int on_bunny = touching && touch_x >= (int)bx + spr / 5 && touch_x < (int)bx + spr * 4 / 5 &&
+        int bxa = (int)(bx + ar_off);
+        int on_bunny = touching && touch_x >= bxa + spr / 5 && touch_x < bxa + spr * 4 / 5 &&
                        touch_y >= GROUND_Y - spr * 17 / 20 && touch_y < GROUND_Y;
 
         us_touch = us_since(st0);
@@ -720,7 +827,7 @@ void bunny_demo_loop(void)
                 action_len = bunny_clip_duration(act) * (act == CLIP_HOP || act == CLIP_LOVE ? 1.0f : 1.5f);
                 state_t_s = 0.0f;
             } else if (poked && !on_bunny) {  /* run to where you touched */
-                target_x = (float)touch_x - (float)spr / 2.0f;
+                target_x = (float)touch_x - ar_off - (float)spr / 2.0f;
                 st = ST_WANDER;
                 state_t_s = 0.0f;
             }
@@ -817,13 +924,32 @@ void bunny_demo_loop(void)
         us_nn = us_since(c0);
         uint32_t st3 = DWT->CYCCNT;
         /* ---- draw ---- */
+        if (cam_mode && imu_rc == 0) {
+            /* AR anchor: turning the board shifts the bunny the other way, so
+             * he seems to stay put in the room; drifts back when still */
+            float g[3];
+            imu_last_gyro(g);
+            float rate = g[AR_AXIS];
+            if (fabsf(rate) > AR_DEADBAND) ar_off += AR_SIGN * rate * AR_PX_PER_DEG * dt;
+            ar_off -= ar_off * AR_RETURN * dt;
+            if (ar_off > AR_MAX) ar_off = AR_MAX;
+            if (ar_off < -AR_MAX) ar_off = -AR_MAX;
+        }
         float k = (float)spr / 512.0f;
-        int ox = (int)bx + (int)(shown.dx * k);
+        int ox = (int)(bx + ar_off) + (int)(shown.dx * k);
         int oy = GROUND_Y - spr + (int)(shown.dy * k);
         rect_t cur = {ox, oy, ox + spr, oy + spr};
-        fill_rect(prev_dot.x0, prev_dot.y0, prev_dot.x1, prev_dot.y1, 255, 255, 255);
-        clear_uncovered(prev, cur);
-        draw_sprite(ox, oy, facing_left);
+        if (cam_mode) {
+            /* the frame started last loop; wait up to 40 ms for it, then start the next */
+            uint32_t cw0 = DWT->CYCCNT;
+            while (!camera_capture_poll() && us_since(cw0) < 40000u) {}
+            draw_camera_bg(w, GRAPH_Y0, ox, oy, facing_left);  /* camera + bunny, row by row */
+            camera_capture_start();
+        } else {
+            fill_rect(prev_dot.x0, prev_dot.y0, prev_dot.x1, prev_dot.y1, 255, 255, 255);
+            clear_uncovered(prev, cur);
+            draw_sprite(ox, oy, facing_left, 0);
+        }
         draw_effects(&shown, ox, oy, facing_left);
         prev = cur;
         prev_dot = (rect_t){0, 0, 0, 0};
@@ -831,7 +957,8 @@ void bunny_demo_loop(void)
             fill_circle(touch_x, touch_y, 6, 120, 80, 200);
             prev_dot = (rect_t){touch_x - 7, touch_y - 7, touch_x + 8, touch_y + 8};
         }
-        draw_graph(w, h);
+        draw_graph(w - ICON_W, h);
+        draw_icon(cam_mode, w, h);
         display_flush();
         if (wdt_rc == ARM_DRIVER_OK) Driver_WDT0.Feed();
         us_draw = us_since(st3);
@@ -854,8 +981,8 @@ void bunny_demo_loop(void)
             g_bunny_nn_us = nn_us_acc / 60;
             t_stat = t1;
             nn_us_acc = 0;
-            printf("bunny: %lu fps, NN %lu us, state %s, clip %s, imu %d, mic %d dB, stack %lu B\n",
-                   (unsigned long)g_bunny_fps, (unsigned long)g_bunny_nn_us, state_names[st],
+            printf("bunny: [%s] %lu fps, NN %lu us, state %s, clip %s, imu %d, mic %d dB, stack %lu B\n",
+                   cam_mode ? "camera" : "home", (unsigned long)g_bunny_fps, (unsigned long)g_bunny_nn_us, state_names[st],
                    bunny_clip_name(clip), (int)motion, (int)graph_db[GRAPH_N - 1], (unsigned long)stack_used());
         }
     }

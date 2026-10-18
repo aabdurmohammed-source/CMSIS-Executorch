@@ -27,6 +27,7 @@ extern ARM_DRIVER_IMU BMI323;
 volatile int32_t g_imu_dbg[4];  /* debugger-readable: init results */
 
 static float last_ax, last_ay, last_az;
+static float last_g[3];  /* latest gyro reading, deg/s */
 static int have_last;
 
 static float value_to_float(const ARM_IMU_SENSOR_VALUE *v)
@@ -75,6 +76,9 @@ int imu_poll(float *motion, float *ax, float *ay, float *az)
 
     float x = value_to_float(&a.x), y = value_to_float(&a.y), z = value_to_float(&a.z);
     float gx = value_to_float(&g.x), gy = value_to_float(&g.y), gz = value_to_float(&g.z);
+    last_g[0] = gx;
+    last_g[1] = gy;
+    last_g[2] = gz;
 
     float jolt = 0.0f;  /* change in acceleration, in g */
     if (have_last) {
@@ -92,4 +96,11 @@ int imu_poll(float *motion, float *ax, float *ay, float *az)
     if (ay) *ay = y;
     if (az) *az = z;
     return 0;
+}
+
+void imu_last_gyro(float *g)
+{
+    g[0] = last_g[0];
+    g[1] = last_g[1];
+    g[2] = last_g[2];
 }

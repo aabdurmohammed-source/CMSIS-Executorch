@@ -13,6 +13,9 @@ int imu_init(void);
  * Returns 0 on success. */
 int imu_poll(float *motion, float *ax, float *ay, float *az);
 
+/* Gyro (deg/s, x y z) from the latest imu_poll() */
+void imu_last_gyro(float *g);
+
 #ifdef __cplusplus
 }
 #endif

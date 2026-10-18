@@ -87,6 +87,35 @@ int camera_capture(void)
     return (cam_events & ~ARM_CPI_EVENT_CAMERA_CAPTURE_STOPPED) ? 1 : 0;  /* 1 = frame with errors */
 }
 
+/* Non-blocking snapshots: camera_capture_start() kicks off one frame and
+ * camera_capture_poll() reports when it has landed, so the caller can do other
+ * work meanwhile. (Continuous CaptureVideo raised a bus error and broke the
+ * NN's memory, so it is not used.) */
+static int cam_busy;
+
+int camera_capture_start(void)
+{
+    if (cam_busy) return 1;
+    cam_events = 0;
+    if (Driver_CPI.CaptureFrame(cam_buf) != ARM_DRIVER_OK) return -1;
+    cam_busy = 1;
+    return 0;
+}
+
+int camera_capture_poll(void)
+{
+    if (!cam_busy || !(cam_events & ARM_CPI_EVENT_CAMERA_CAPTURE_STOPPED)) return 0;
+    cam_busy = 0;
+    SCB_InvalidateDCache_by_Addr((uint32_t *)cam_buf, (int32_t)sizeof(cam_buf));
+    return 1;
+}
+
+void camera_capture_abort(void)
+{
+    if (cam_busy) Driver_CPI.Stop();
+    cam_busy = 0;
+}
+
 uint32_t camera_last_events(void)
 {
     return cam_events;
