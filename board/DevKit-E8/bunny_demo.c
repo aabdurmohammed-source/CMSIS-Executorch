@@ -91,6 +91,7 @@ extern int nn_forward(const float *in, int n_in, const float **out, int *n_out);
 
 volatile uint32_t g_bunny_nn_us, g_bunny_fps;  /* debugger-readable */
 volatile int32_t g_force_world = -1;
+volatile int32_t g_force_clip = -1;  /* debugger-writable: play this clip now (remote test) */
 volatile int32_t g_test_doodle = 0;  /* debugger-writable: 1 star, 2 house, 3 smiley, 4 fish (remote test) */  /* debugger-writable: 1 = camera world, 0 = home (acts like a tap on the button) */
 
 #define SLOW_FRAME_MS   150     /* a frame slower than this prints its stage times */
@@ -229,6 +230,22 @@ static int gt_setup(void)
         if (gt_read(0x8140, id, 4) == 0 && id[0] == '9') return 0;
     }
     return -1;
+}
+
+static void busy_ms(uint32_t ms);
+
+/* Touch stopped answering (bus or chip stuck): abort, clear the bus (clocks a
+ * stuck data line free), reset the GT911 and find it again. */
+static int gt_recover(void)
+{
+    Driver_I2C1.Control(ARM_I2C_ABORT_TRANSFER, 0);
+    busy_ms(2);
+    int bc = Driver_I2C1.Control(ARM_I2C_BUS_CLEAR, 0);
+    busy_ms(2);
+    GT911.PowerControl(ARM_POWER_OFF);
+    int r = gt_setup();
+    printf("touch: recovery (bus clear %d) -> %s\n", bc, r == 0 ? "ok" : "failed");
+    return r;
 }
 
 /* 1 = new touch report with a finger down at (*x, *y), 0 = no new report,
@@ -1212,6 +1229,7 @@ static float        identity[4] = {0.0f, 1.0f, 128.0f, 1.0f};  /* hue, sat, ear_
 static void set_clip(bunny_clip_t c)
 {
     if (c == clip) return;
+    printf("clip: %s\n", bunny_clip_name(c));
     memcpy(from_d, shown.d, sizeof(from_d));
     from_dx = shown.dx;
     from_dy = shown.dy;
@@ -1378,7 +1396,7 @@ void bunny_demo_loop(void)
     memset(&fs, 0, sizeof(fs));
     float gaze = 0.0f;     /* 0..1: how much he looks at your face */
     uint32_t cam_frames = 0, face_us = 0;
-    int touch_fails = 0, imu_fails = 0;
+    int touch_fails = 0, imu_fails = 0, touch_bad = 0;
     uint32_t was_pressed = 0, frame = 0, nn_us_acc = 0;
     rect_t prev = {0, 0, 0, 0}, prev_dot = {0, 0, 0, 0};
     uint32_t t_prev = DWT->CYCCNT, t_stat = t_prev;
@@ -1412,9 +1430,14 @@ void bunny_demo_loop(void)
                     printf("touch: %d failed reads, pausing 1 s\n", touch_fails);
                     touch_pause = 1.0f;
                     touch_fails = 0;
+                    if (++touch_bad >= 2) {  /* still failing after a pause: recover */
+                        gt_recover();
+                        touch_bad = 0;
+                    }
                 }
             } else {
                 touch_fails = 0;
+                touch_bad = 0;
             }
             if (r == 1 && (tx >= w || ty >= h)) {
                 r = 0;  /* ignore coordinates off the panel */
@@ -1587,6 +1610,7 @@ void bunny_demo_loop(void)
             else if (newly & 8u) act = CLIP_CLAP;
             else if (newly & 16u) act = CLIP_EAT;
             else if (poked && on_bunny) act = CLIP_LOVE;
+            if (g_force_clip >= 0 && g_force_clip < CLIP_COUNT) { act = (bunny_clip_t)g_force_clip; g_force_clip = -1; }
 
             if (act == CLIP_LOVE) {  /* petted: affection, and maybe a lesson */
                 affection = clamp01(affection + 0.35f);
@@ -2052,6 +2076,12 @@ void bunny_demo_loop(void)
 
         /* ---- keep the dials in the space the model was trained on ---- */
         {
+            /* a NaN / infinity (one bad formula) would warp the picture and can stop the runtime */
+            for (int i = 0; i < BUNNY_NDIAL; ++i) {
+                if (!isfinite(shown.d[i])) shown.d[i] = isfinite(target.d[i]) ? target.d[i] : 0.0f;
+            }
+            if (!isfinite(shown.dx)) shown.dx = 0.0f;
+            if (!isfinite(shown.dy)) shown.dy = 0.0f;
             float se = 0.0f, sm = 0.0f;
             for (int i = D_EYE_OPEN; i <= D_EYE_SAD; ++i) { if (shown.d[i] < 0.0f) shown.d[i] = 0.0f; se += shown.d[i]; }
             for (int i = D_MOUTH_SMILE; i <= D_MOUTH_YAWN; ++i) { if (shown.d[i] < 0.0f) shown.d[i] = 0.0f; sm += shown.d[i]; }

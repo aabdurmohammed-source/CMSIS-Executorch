@@ -199,7 +199,9 @@ static void sit(float t, float a, bunny_pose_t *o)
 static void yawn(float t, float a, bunny_pose_t *o)
 {
     (void)a;
-    float u = powf(sinf(PI * minf(1.0f, modf_pos(t, 3.0f) / 2.4f)), 1.5f);
+    /* sinf(PI) is a tiny negative number in float, and powf(negative, 1.5) is NaN */
+    float sv = sinf(PI * minf(1.0f, modf_pos(t, 3.0f) / 2.4f));
+    float u = powf(sv > 0.0f ? sv : 0.0f, 1.5f);
     P(o, D_EYE_OPEN, D_MOUTH_SMILE);
     o->d[D_EYE_OPEN] = 1.0f - u;
     o->d[D_EYE_SLEEP] = u;
