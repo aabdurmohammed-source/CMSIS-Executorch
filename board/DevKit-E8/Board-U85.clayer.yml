@@ -51,14 +51,14 @@ layer:
     - APP_METHOD_POOL_SIZE: 0x80000   # 512 KB: model I/O only
     # Run the bunny model from a copy in SRAM: the NPU fails reading weights
     # above 0x80400000 in MRAM, where a 2.4 MB model ends up (see app_main.cpp)
-    - APP_MODEL_SRAM_SIZE: 0x280000
+    - APP_MODEL_SRAM_SIZE: 0x1A0000   # 96x96 program 1.63 MB (128x128: 0x280000)
     # The models run from SRAM copies, so the NPU fetches its command stream
     # (QCONFIG) and weights (region 0) through the SRAM AXI port (memory
     # attribute 0). The driver default (2/3 = EXT port) bus-faulted (status
     # 0x804) on anything outside low MRAM.
     - NPU_QCONFIG: 0
     - NPU_REGIONCFG_0: 0
-    - APP_TEMP_POOL_SIZE: 0x310000  # v2 128x128 decoder: Vela scratch 3.0 MB
+    - APP_TEMP_POOL_SIZE: 0x1C0000  # v2 96x96 decoder: Vela scratch 1.73 MB (128x128 needs 0x310000)
 
   packs:
     - pack: AlifSemiconductor::Ensemble@^2.2.0-0

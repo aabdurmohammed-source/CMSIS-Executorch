@@ -177,3 +177,7 @@ Branch `bunny` (from working-checkpoint 432c0e53). Kit + data in model/bunny/ (t
 - Fix: (1) firmware copies the model into SRAM at boot (APP_MODEL_SRAM_SIZE 0x280000, app_main.cpp) - also the doodle model; (2) driver defines NPU_QCONFIG=0, NPU_REGIONCFG_0=0 (SRAM port) in the board layer; (3) Vela system Ethos_U85_SRAM_Only / memory Sram_Only (csolution mlops). App MRAM region enlarged to 0x80200000-0x80560000 (TOC/stubs from 0x8057C890).
 - Result: DecoderV2 128x128, a16w8, 13/13 ops on the U85, 2.58 MB program, 3.0 MB scratch: **16.7 ms/frame**, loop 16 fps. Doodle 0.23 ms (from SRAM). Bulk SRAM ~7.97 of 8 MiB used (model copy 2.5, scratch 3.06, method 0.5, LCD 1.1, camera 0.59, doodle 0.22).
 - Export: `AI_LAYER_A16W8=1 BUNNY_SIZE=128 .venv/Scripts/python.exe create_ai_layer.py cmsis-executorch.cbuild-mlops.yml`
+
+## Back to 96x96 + bold lines (Sat Oct 17, late night)
+- Shipped model: DecoderV2 96x96 (Abdul's choice), re-exported with the SRAM-only Vela config and run from an SRAM copy: **9.4 ms/frame** (was 10.6 ms from MRAM), loop 18 fps. APP_MODEL_SRAM_SIZE 0x1A0000, APP_TEMP_POOL_SIZE 0x1C0000 (128x128 values in the clayer comments; 128x128 still works by re-exporting with BUNNY_SIZE=128 and restoring those sizes).
+- Bold lines (bunny_demo.c convert_output): after the NN, pixels with luminance < 150 are pushed toward a deep purple (LINE_DARKEN 0.75) and dark pixels darken their 4 neighbours (LINE_THICKEN 0.65) -> outline/eyes/mouth darker and ~1 px thicker at 96 px (~4-5 px on screen). Tunable #defines.

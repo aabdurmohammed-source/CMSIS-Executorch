@@ -375,13 +375,45 @@ static void build_tables(void)
 }
 
 /* NN output (3 x S x S floats, 0..1) -> src_rgb */
+/* Bold lines: darken the outline / eyes / mouth and thicken them by about a
+ * pixel (at NN resolution, so ~4-5 px on screen). Runs on the small NN image. */
+#define LINE_LUM_DARK   60.0f   /* luminance treated as fully "line"            */
+#define LINE_LUM_LIGHT  150.0f  /* luminance above this is not line at all      */
+#define LINE_DARKEN     0.75f   /* 0..1: how far line pixels move to LINE_RGB   */
+#define LINE_THICKEN    0.65f   /* 0..1: how much a dark neighbour darkens a pixel */
+#define LINE_R 34
+#define LINE_G 16
+#define LINE_B 50
+
 static void convert_output(const float *out)
 {
-    int n = nn_side * nn_side;
+    static float dark[MAX_NN * MAX_NN];
+    int n = nn_side * nn_side, s = nn_side;
     for (int i = 0; i < n; ++i) {
         for (int c = 0; c < 3; ++c) {
             float v = out[c * n + i] * 255.0f + 0.5f;
             src_rgb[i * 3 + c] = (uint8_t)(v < 0.0f ? 0.0f : (v > 255.0f ? 255.0f : v));
+        }
+        float lum = 0.30f * src_rgb[i * 3] + 0.59f * src_rgb[i * 3 + 1] + 0.11f * src_rgb[i * 3 + 2];
+        float d = (LINE_LUM_LIGHT - lum) / (LINE_LUM_LIGHT - LINE_LUM_DARK);
+        dark[i] = d < 0.0f ? 0.0f : (d > 1.0f ? 1.0f : d);
+    }
+    for (int y = 0; y < s; ++y) {
+        for (int x = 0; x < s; ++x) {
+            int i = y * s + x;
+            float d = dark[i], nb = 0.0f;
+            if (x > 0 && dark[i - 1] > nb) nb = dark[i - 1];
+            if (x < s - 1 && dark[i + 1] > nb) nb = dark[i + 1];
+            if (y > 0 && dark[i - s] > nb) nb = dark[i - s];
+            if (y < s - 1 && dark[i + s] > nb) nb = dark[i + s];
+            nb *= LINE_THICKEN;
+            if (nb > d) d = nb;
+            if (d <= 0.0f) continue;
+            float k = LINE_DARKEN * d;
+            uint8_t *p = &src_rgb[i * 3];
+            p[0] = (uint8_t)(p[0] + (LINE_R - p[0]) * k);
+            p[1] = (uint8_t)(p[1] + (LINE_G - p[1]) * k);
+            p[2] = (uint8_t)(p[2] + (LINE_B - p[2]) * k);
         }
     }
 }
