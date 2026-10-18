@@ -12,6 +12,9 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "RTE_Components.h"
+#include CMSIS_device_header
+
 #include "voice.h"
 
 extern int kws_classify(const float *in, float *scores, int n);  /* src/app_main.cpp */
@@ -41,6 +44,7 @@ static const char *const class_names[KWS_N_CLASSES] = {
     "up", "down", "left", "right", "go", "stop", "yes", "no", "happy", "silence", "unknown",
 };
 
+volatile uint32_t g_kws_us;          /* last keyword model run on the NPU, us */
 volatile int32_t g_voice_w0 = -1;  /* debugger-readable: where the last 1 s window started */
 static float fr_db[200];
 static float xbuf[N_SAMPLES];
@@ -195,7 +199,9 @@ int voice_listen(const int16_t *pcm, int n, float *conf)
     g_voice_w0 = w0;
     features(pcm + w0);
     float sc[KWS_N_CLASSES];
+    uint32_t c0 = DWT->CYCCNT;
     int k = kws_classify(feat, sc, KWS_N_CLASSES);
+    g_kws_us = (DWT->CYCCNT - c0) / (SystemCoreClock / 1000000U);
     if (k != KWS_N_CLASSES) {
         printf("voice: kws_classify failed (%d)\n", k);
         return -1;

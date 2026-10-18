@@ -95,6 +95,8 @@ volatile int32_t g_force_world = -1;
 volatile int32_t g_force_clip = -1;  /* debugger-writable: play this clip now (remote test) */
 volatile int32_t g_force_voice = -1; /* debugger-writable: act as if this KWS_ word was heard */
 volatile int32_t g_force_listen = 0; /* debugger-writable: 1 = as if the joystick centre was pressed */
+volatile int32_t g_stats = 0;        /* stats overlay on/off (tap the FOOD bar); debugger-writable */
+extern volatile uint32_t g_kws_us;   /* voice.c */
 
 /* push to talk: press the joystick centre, say a word (keyword model on the NPU) */
 #define VOICE_TIMEOUT_S 2.5f
@@ -724,7 +726,7 @@ static void draw_effects(const bunny_pose_t *p, int ox, int oy, int flip)
 
 /* ---- tiny 5x7 font (speech bubbles) ---------------------------------------- */
 
-static const uint8_t font5x7[28][7] = {
+static const uint8_t font5x7[42][7] = {
     {0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11}, {0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E},  /* A B */
     {0x0E, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0E}, {0x1E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1E},  /* C D */
     {0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F}, {0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10},  /* E F */
@@ -739,6 +741,13 @@ static const uint8_t font5x7[28][7] = {
     {0x11, 0x11, 0x11, 0x15, 0x15, 0x15, 0x0A}, {0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11},  /* W X */
     {0x11, 0x11, 0x0A, 0x04, 0x04, 0x04, 0x04}, {0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F},  /* Y Z */
     {0x0E, 0x11, 0x01, 0x02, 0x04, 0x00, 0x04}, {0x04, 0x04, 0x04, 0x04, 0x04, 0x00, 0x04},  /* ? ! */
+    {0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E}, {0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E},  /* 0 1 */
+    {0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F}, {0x1F, 0x02, 0x04, 0x02, 0x01, 0x11, 0x0E},  /* 2 3 */
+    {0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02}, {0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E},  /* 4 5 */
+    {0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E}, {0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08},  /* 6 7 */
+    {0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E}, {0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C},  /* 8 9 */
+    {0x00, 0x00, 0x00, 0x00, 0x00, 0x0C, 0x0C}, {0x00, 0x0C, 0x0C, 0x00, 0x0C, 0x0C, 0x00},  /* . : */
+    {0x01, 0x01, 0x02, 0x04, 0x08, 0x10, 0x10}, {0x18, 0x19, 0x02, 0x04, 0x08, 0x13, 0x03},  /* / % */
 };
 
 /* Upper-case text (A-Z, space, ?, !) with s x s pixel dots; returns the width */
@@ -748,7 +757,8 @@ static int draw_text(int x, int y, const char *t, int sc, uint8_t r, uint8_t g, 
     for (; *t; ++t) {
         char c = *t;
         if (c >= 'a' && c <= 'z') c = (char)(c - 32);
-        int gi = (c >= 'A' && c <= 'Z') ? c - 'A' : (c == '?' ? 26 : (c == '!' ? 27 : -1));
+        int gi = (c >= 'A' && c <= 'Z') ? c - 'A' : (c >= '0' && c <= '9') ? 28 + c - '0'
+               : c == '?' ? 26 : c == '!' ? 27 : c == '.' ? 38 : c == ':' ? 39 : c == '/' ? 40 : c == '%' ? 41 : -1;
         if (gi >= 0) {
             for (int row = 0; row < 7; ++row) {
                 for (int col = 0; col < 5; ++col) {
@@ -1119,6 +1129,26 @@ static void world_clear_all(int cam_mode)
 }
 
 /* Food meter, top-left */
+/* Live performance overlay (tap the FOOD bar to toggle): what runs where and how fast */
+static void draw_stats(int cam, uint32_t fps, uint32_t bunny_us, uint32_t face_us, uint32_t doodle_us)
+{
+    char l[7][32];
+    snprintf(l[0], sizeof(l[0]), "%lu FPS  M55 400MHZ", (unsigned long)fps);
+    snprintf(l[1], sizeof(l[1]), "U85 BUNNY  %lu.%lu MS", (unsigned long)(bunny_us / 1000), (unsigned long)(bunny_us / 100 % 10));
+    if (cam) snprintf(l[2], sizeof(l[2]), "U85 FACE   %lu.%lu MS", (unsigned long)(face_us / 1000), (unsigned long)(face_us / 100 % 10));
+    else snprintf(l[2], sizeof(l[2]), "U85 FACE   CAMERA OFF");
+    if (g_kws_us) snprintf(l[3], sizeof(l[3]), "U85 VOICE  %lu.%02lu MS", (unsigned long)(g_kws_us / 1000), (unsigned long)(g_kws_us / 10 % 100));
+    else snprintf(l[3], sizeof(l[3]), "U85 VOICE  WAITING");
+    if (doodle_us) snprintf(l[4], sizeof(l[4]), "U85 DOODLE %lu.%02lu MS", (unsigned long)(doodle_us / 1000), (unsigned long)(doodle_us / 10 % 100));
+    else snprintf(l[4], sizeof(l[4]), "U85 DOODLE WAITING");
+    snprintf(l[5], sizeof(l[5]), "SRAM 7.9/8 MB  4 MODELS");
+    snprintf(l[6], sizeof(l[6]), "ALL ON DEVICE");
+    int x0 = 8, y0 = 124, lh = 18, sc = 2;  /* below the speech bubble */
+    fill_rect(x0, y0, x0 + 24 * 6 * sc + 12, y0 + 7 * lh + 10, 120, 80, 200);
+    fill_rect(x0 + 2, y0 + 2, x0 + 24 * 6 * sc + 10, y0 + 7 * lh + 8, 255, 255, 255);
+    for (int i = 0; i < 7; ++i) draw_text(x0 + 8, y0 + 8 + i * lh, l[i], sc, 70, 40, 95);
+}
+
 static void draw_hunger(float hunger)
 {
     fill_bg(4, 2, 176, 24);
@@ -1480,7 +1510,7 @@ void bunny_demo_loop(void)
     float gaze = 0.0f;     /* 0..1: how much he looks at your face */
     uint32_t cam_frames = 0, face_us = 0;
     int touch_fails = 0, imu_fails = 0, touch_bad = 0;
-    uint32_t was_pressed = 0, frame = 0, nn_us_acc = 0;
+    uint32_t was_pressed = 0, frame = 0, nn_us_acc = 0, bunny_npu_us = 0, doodle_us = 0;
     rect_t prev = {0, 0, 0, 0}, prev_dot = {0, 0, 0, 0};
     uint32_t t_prev = DWT->CYCCNT, t_stat = t_prev;
 
@@ -1550,6 +1580,11 @@ void bunny_demo_loop(void)
                 touch_y = h - 10;
             }
             g_force_world = -1;
+        }
+        if (poked && touch_x < 180 && touch_y < 30) {  /* the FOOD bar: stats overlay on / off */
+            poked = 0;
+            g_stats = !g_stats;
+            printf("stats overlay %s\n", g_stats ? "on" : "off");
         }
         /* world-switch button */
         if (poked && touch_x >= w - ICON_W && touch_y >= GRAPH_Y0) {
@@ -2096,6 +2131,7 @@ void bunny_demo_loop(void)
             uint32_t dc0 = DWT->CYCCNT;
             int nd = doodle_classify(in28, sc8, 8);
             uint32_t dus = us_since(dc0);
+            doodle_us = dus;
             if (nd == 8) {
                 int best = 0;
                 float mx = sc8[0], sum = 0.0f;
@@ -2281,6 +2317,7 @@ void bunny_demo_loop(void)
         int rc = 0;
         if (!cam_mode || (frame & 1u) == 0u) {  /* camera world: every other frame */
             rc = nn_forward(nn_in, BUNNY_NDIAL, &out, &n_out);
+            bunny_npu_us = (DWT->CYCCNT - c0) / (SystemCoreClock / 1000000u);
             if (rc == 0) convert_output(out);
         }
         nn_us_acc += (DWT->CYCCNT - c0) / (SystemCoreClock / 1000000u);
@@ -2355,6 +2392,7 @@ void bunny_demo_loop(void)
         draw_icon(cam_mode, w, h);
         draw_eraser(h);
         draw_hunger(hunger);
+        if (g_stats) draw_stats(cam_mode, g_bunny_fps, bunny_npu_us, face_us, doodle_us);
         display_flush();
         if (wdt_rc == ARM_DRIVER_OK) Driver_WDT0.Feed();
         us_draw = us_since(st3);
