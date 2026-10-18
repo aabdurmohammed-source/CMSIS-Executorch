@@ -99,7 +99,7 @@ volatile int32_t g_stats = 0;        /* stats overlay on/off (tap the FOOD bar);
 extern volatile uint32_t g_kws_us;   /* voice.c */
 
 /* push to talk: press the joystick centre, say a word (keyword model on the NPU) */
-#define VOICE_TIMEOUT_S 2.5f
+#define VOICE_TIMEOUT_S 3.0f
 #define VOICE_MIN_CONF  0.55f   /* less sure than this: "???"                        */
 #define RIDE_BLOCK_S    8.0f    /* after "down" takes him off your shoulder: stay down */
 volatile int32_t g_test_doodle = 0;  /* debugger-writable: 1 star, 2 house, 3 smiley, 4 fish (remote test) */  /* debugger-writable: 1 = camera world, 0 = home (acts like a tap on the button) */
@@ -1708,7 +1708,7 @@ void bunny_demo_loop(void)
             vstate = 1;
             vrec_t = 0.0f;
             snprintf(bubble_text, sizeof(bubble_text), "LISTENING...");
-            bubble_t = 1.6f;
+            bubble_t = 2.0f;  /* as long as the recording */
             if (!cam_mode) fill_bg(0, 24, w, 100);
             printf("voice: listening\n");
         }

@@ -2,7 +2,7 @@
  * Keyword spotting: a small DS-CNN trained on Google Speech Commands
  * (model/kws/train_kws.py) runs on the Ethos-U85; works for any voice.
  *
- * The 1.5 s push-to-talk recording -> find the word (the loud burst around
+ * The 2 s push-to-talk recording -> find the word (the loud burst around
  * the loudest moment) -> 1 s window centred on it -> 49 x 40 log-mel
  * features (exactly as model/kws/kws_features.py) -> NPU -> softmax.
  *---------------------------------------------------------------------------*/
@@ -46,7 +46,7 @@ static const char *const class_names[KWS_N_CLASSES] = {
 
 volatile uint32_t g_kws_us;          /* last keyword model run on the NPU, us */
 volatile int32_t g_voice_w0 = -1;  /* debugger-readable: where the last 1 s window started */
-static float fr_db[200];
+static float fr_db[208];             /* loudness frames: 2 s = 198 */
 static float xbuf[N_SAMPLES];
 float g_voice_feat[NFR * NMEL];  /* debugger-readable: the last features */
 #define feat g_voice_feat

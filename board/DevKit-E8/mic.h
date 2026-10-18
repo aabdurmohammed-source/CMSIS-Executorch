@@ -16,8 +16,8 @@ int mic_poll(float *level);
 
 uint32_t mic_block_count(void);
 
-/* Recording for speech: 1.5 s at 8 kHz. Starts now; mic_poll() pauses meanwhile. */
-#define MIC_REC_SAMPLES 12000U
+/* Recording for speech: 2 s at 8 kHz (was 1.5 s: people who paused got cut off). Starts now; mic_poll() pauses meanwhile. */
+#define MIC_REC_SAMPLES 16000U
 int mic_record_start(void);
 
 /* Non-blocking. 1 = done: *pcm holds *n mono samples (the louder mic) until the

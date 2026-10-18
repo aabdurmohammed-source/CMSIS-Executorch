@@ -24,7 +24,7 @@ Everything runs on the board. No cloud, no host PC, no camera frames stored.
 
 > Arm + Meta ExecuTorch Edge AI Hackathon, SFSU, October 17-18 2026.
 > Team: Abdul Mohammed and Awab Ibrahim.
-> Judged version: tag **`v1.1-demo`** (the tag points at the exact commit used in the demo).
+> Judged version: tag **`v1.2-demo`** (the tag points at the exact commit used in the demo).
 
 ---
 
@@ -146,8 +146,8 @@ cycle counter (DWT). Model timings are averages printed at boot (`bench:`,
 | BlazeFace on the U85 | **10.3 ms** |
 | Keyword spotter on the U85 | **0.65 ms** |
 | Doodle classifier on the U85 | **0.23 ms** |
-| Voice command end to end after the 1.5 s recording (endpointing + log-mel on the CPU + NPU) | ~29 ms |
-| Voice command, from releasing the word to the bunny reacting | < 1.6 s (dominated by the fixed 1.5 s recording window) |
+| Voice command end to end after the 2 s recording (endpointing + log-mel on the CPU + NPU) | ~29 ms |
+| Voice command, from releasing the word to the bunny reacting | < 1.6 s (dominated by the fixed 2 s recording window) |
 | Frame rate, home world (NN every frame) | **20 fps** |
 | Frame rate, camera world (camera + colour correction + face detection) | **12-15 fps** |
 
@@ -231,7 +231,7 @@ without a single new sprite.
 (`model/kws/kws_features.py` = `board/DevKit-E8/voice.c`; checked on a real
 board recording: max difference 8e-6). Trained with background noise at
 0-25 dB SNR, +-150 ms time shifts and spectrogram masking. On the board the word
-is located in the 1.5 s push-to-talk recording (the loud burst around the
+is located in the 2 s push-to-talk recording (the loud burst around the
 loudest moment) and a 1 s window is centred on it.
 
 ## 5. Build, flash and run
