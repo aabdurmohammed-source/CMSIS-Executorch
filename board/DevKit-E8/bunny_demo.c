@@ -896,13 +896,33 @@ static void ink_rasterize(float *out28)
 }
 
 /* Speech bubble at the top of the screen */
+/* A speech bubble; '|' starts a new line (lines are centred) */
 static void draw_bubble(const char *text, int w)
 {
-    int sc = 4, tw = (int)strlen(text) * 6 * sc - sc;
-    int x0 = (w - tw) / 2 - 16, y0 = 24, x1 = x0 + tw + 32, y1 = y0 + 7 * sc + 28;
+    int sc = 4, lines = 1, longest = 0, n = 0;
+    for (const char *c = text;; ++c) {
+        if (*c == '|' || *c == 0) {
+            if (n > longest) longest = n;
+            n = 0;
+            if (*c == 0) break;
+            ++lines;
+        } else {
+            ++n;
+        }
+    }
+    int lh = 7 * sc + 10, tw = longest * 6 * sc - sc;
+    int x0 = (w - tw) / 2 - 16, y0 = 24, x1 = x0 + tw + 32, y1 = y0 + lines * lh + 18;
     fill_rect(x0, y0, x1, y1, 120, 80, 200);
     fill_rect(x0 + 4, y0 + 4, x1 - 4, y1 - 4, 255, 255, 255);
-    draw_text(x0 + 16, y0 + 14, text, sc, 70, 40, 95);
+    const char *t = text;
+    for (int l = 0; l < lines; ++l) {
+        char buf[32];
+        int k = 0;
+        while (*t && *t != '|' && k < (int)sizeof(buf) - 1) buf[k++] = *t++;
+        buf[k] = 0;
+        if (*t == '|') ++t;
+        draw_text((w - (k * 6 * sc - sc)) / 2, y0 + 14 + l * lh, buf, sc, 70, 40, 95);
+    }
 }
 
 /* ---- the bunny's world: drawings that come to life ------------------------ */
@@ -1471,6 +1491,9 @@ void bunny_demo_loop(void)
     if (wdt_rc == ARM_DRIVER_OK) wdt_rc = Driver_WDT0.Start();
     printf("bunny: watchdog %d ms -> %d\n", WATCHDOG_MS, wdt_rc);
     printf("bunny: running\n");
+    snprintf(bubble_text, sizeof(bubble_text), "HEY!|MY NAME IS ALF!");  /* hello on start-up, with a wave */
+    bubble_t = 4.0f;
+    g_force_clip = CLIP_WAVE;
     for (;;) {
         /* Keep the cycle counter running: all timing and timeouts use it, and a
          * debugger disconnect can switch the trace unit (and the counter) off. */

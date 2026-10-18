@@ -254,3 +254,4 @@ Branch `bunny` (from working-checkpoint 432c0e53). Kit + data in model/bunny/ (t
 - Gotcha: regenerate J-Link scripts that write globals (cw.jlink etc.) after every build; addresses shift.
 - Face box (debug) off for the demo (FACE_BOX 0).
 - CORRECTION: the black camera frames (all exactly zero) were just the board lying face-down (lens covered), not a camera fault. The auto-restart added for it was removed again (it would restart the camera for nothing while face-down, on the I2C bus the touch panel shares). camera_restart() stays in camera.c, unused.
+- Start-up greeting: bubble "HEY! / MY NAME IS ALF!" for 4 s with a wave; speech bubbles now support two lines ("|" = new line, centred).
