@@ -124,3 +124,14 @@ Branch `bunny` (from working-checkpoint 432c0e53). Kit + data in model/bunny/ (t
 
 - The NPU is not the bottleneck: even 96x96 is fast enough for 30+ fps. Training time on the laptop CPU is (96 full: ~15 min/epoch; 64 full: ~7.5 min/epoch).
 - Next: Phase 2 training.
+
+## Bunny companion - Phase 2 (training) + Phase 4 (firmware loop) (Sat Oct 17, evening)
+- Size chosen: 48x48, half width (channels 64-48-32-16), per Abdul. 100% NPU, 246 KB weights, 109 KB scratch, 0.88 ms per frame on the U85 (startup bench).
+- model/train_bunny.py trains on a clock (TRAIN_MINUTES, default 17), all 38k training frames, L1 + 0.2 MSE with 5x weight on dark outline pixels, keeps Windows awake. Result: 17.3 min, ~6.1 epochs, val L1 0.0246 (0.0453 after epoch 1). Grids: model/bunny/runs/val_grid.png, blend_grid.png. Body, colours, ears, arms, lying down learned well; eyes/mouth still soft.
+- Firmware (BOARD_BUNNY_DEMO replaces BOARD_FACE_DEMO in the board layer; face_demo.c is compiled out, restorable):
+  - board/DevKit-E8/bunny_clips.c/.h: C port of all 16 clips.py clips + dial ranges/normalisation.
+  - board/DevKit-E8/bunny_demo.c: state machine (idle, wander walk/run, actions, lie down -> sleep after 20 s, wake on any input), 0.45 s smoothstep clip blending + low-pass on dials, NN every frame, bilinear 48 -> 240 px sprite with flip, CPU effects (zzz, sweat, hearts), touch dot, mic graph, LEDs by mood.
+  - Inputs: tap bunny = love, tap elsewhere = run there, hold on bunny 1.2 s = hatch (random hue/sat/ear_len/head_scale), IMU shake = shake, loud sound = ears perk, joystick A/B/C/D = wave/yawn/hop/clap, centre = eat.
+  - app_main.cpp: nn_forward() generic call; bunny_demo_loop() under BOARD_BUNNY_DEMO.
+- Measured with the epoch-1 weights: 50 fps display loop, NN 0.92 ms in the loop.
+- Blocked: J-Link "cannot connect to the probe" after the board lost power; USB device present. Needs a real unplug/replug. Final-weights firmware is built, not yet flashed.

@@ -40,7 +40,7 @@ int main(void)
     se_services_port_init();
 
     /* Request the clocks the SE has to enable for this core */
-#ifdef BOARD_FACE_DEMO
+#if defined(BOARD_FACE_DEMO) || defined(BOARD_BUNNY_DEMO)
     extern volatile uint32_t g_boot_dbg[4];
     g_boot_dbg[0] = (uint32_t)board_clocks_config(CLKEN_HFOSC_MASK | CLKEN_CLK_100M_MASK);
     g_boot_dbg[1] = SERVICES_heartbeat(se_services_s_handle);
@@ -48,7 +48,7 @@ int main(void)
     board_clocks_config(CLKEN_HFOSC_MASK | CLKEN_CLK_100M_MASK);
 #endif
 
-#ifdef BOARD_FACE_DEMO
+#if defined(BOARD_FACE_DEMO) || defined(BOARD_BUNNY_DEMO)
     /* The MIPI DPHY (LCD) also needs the 20 MHz clock; request it here, like
      * the pack's board layer (clock_init), while the SE answers requests. */
     {

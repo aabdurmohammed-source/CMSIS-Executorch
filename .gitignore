@@ -89,3 +89,4 @@ fvp_stdout.log
 # Bunny training data (250 MB, kept out of git; source: bunny_kit make_dataset.py)
 model/bunny/*.npz
 model/bunny/runs/
+model/bunny/*.log

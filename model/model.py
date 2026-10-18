@@ -29,7 +29,7 @@ def _is_bunny(input_shape: tuple[int, ...]) -> bool:
 
 
 def bunny_config() -> tuple[int, float, Path]:
-    size = int(os.environ.get("BUNNY_SIZE", "64"))
+    size = int(os.environ.get("BUNNY_SIZE", "48"))
     width = float(os.environ.get("BUNNY_WIDTH", "0.5"))
     return size, width, HERE / "bunny" / f"bunny_decoder_{size}_w{width:g}.pt"
 

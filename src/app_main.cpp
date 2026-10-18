@@ -90,11 +90,14 @@ int run_to_pixels(uint8_t* pixels) {
 
 }  // namespace
 
-// Provided by the board layer when it defines BOARD_FACE_DEMO.
-#ifdef BOARD_FACE_DEMO
+// Provided by the board layer when it defines BOARD_FACE_DEMO (face demo) or
+// BOARD_BUNNY_DEMO (bunny companion).
+#if defined(BOARD_FACE_DEMO) || defined(BOARD_BUNNY_DEMO)
+#define BOARD_DEMO 1
 #include "RTE_Components.h"
 #include CMSIS_device_header
 extern "C" void face_demo_loop(void);
+extern "C" void bunny_demo_loop(void);
 // Decoder benchmark results in microseconds (debugger-readable).
 extern "C" volatile uint32_t g_bench_us[3];  // avg, min, max
 volatile uint32_t g_bench_us[3];
@@ -141,6 +144,29 @@ extern "C" int face_mirror(const float* crop, uint8_t* pixels) {
     g_latent[i] = crop[i];
   }
   return run_to_pixels(pixels);
+}
+
+// Runs the model on in[0..n_in) (n_in must be the model's input size) and
+// points *out at its float output (valid until the next run), *n_out values.
+// Returns 0 on success.
+extern "C" int nn_forward(const float* in, int n_in, const float** out, int* n_out) {
+  if (g_module == nullptr || g_input == nullptr || static_cast<size_t>(n_in) != g_in_numel) {
+    return -1;
+  }
+  for (size_t i = 0; i < g_in_numel; ++i) {
+    g_latent[i] = in[i];
+  }
+  auto outputs = g_module->forward(*g_input);
+  if (!outputs.ok() || outputs->empty() || !outputs->front().isTensor()) {
+    return -2;
+  }
+  Tensor t = outputs->front().toTensor();
+  if (t.scalar_type() != ScalarType::Float) {
+    return -3;
+  }
+  *out = t.const_data_ptr<float>();
+  *n_out = static_cast<int>(t.numel());
+  return 0;
 }
 
 extern "C" int app_main(void) {
@@ -206,7 +232,7 @@ extern "C" int app_main(void) {
       const float* p = t.const_data_ptr<float>();
       for (size_t i = 0; i < t.numel() && i < 10; ++i) {
         printf(" %.4f", p[i]);
-#ifdef BOARD_FACE_DEMO
+#ifdef BOARD_DEMO
         g_test_out[i] = p[i];
 #endif
       }
@@ -218,7 +244,7 @@ extern "C" int app_main(void) {
 
   // A board layer can provide face_demo_loop (joystick-driven live faces); it
   // never returns. Targets without one (the FVP) skip it.
-#ifdef BOARD_FACE_DEMO
+#ifdef BOARD_DEMO
   // Time the decoder by itself: 100 forward() calls on the Ethos-U85.
   {
     constexpr int kRuns = 100;
@@ -248,7 +274,11 @@ extern "C" int app_main(void) {
            (unsigned long)g_bench_us[0], (unsigned long)g_bench_us[1], (unsigned long)g_bench_us[2],
            kRuns, (unsigned long)mhz);
   }
+#ifdef BOARD_BUNNY_DEMO
+  bunny_demo_loop();
+#else
   face_demo_loop();
+#endif
 #endif
   printf("\x04");  // EOT: ends the FVP run (semihosting exit); a board just sees a 0x04
   fflush(stdout);

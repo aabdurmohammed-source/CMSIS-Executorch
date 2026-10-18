@@ -10,7 +10,12 @@
  *   joystick C/D   morph along another direction (+ / -)
  *   joystick CENTER new random face
  *   no input       the face slowly drifts to random new faces by itself
+ *
+ * Built only with BOARD_FACE_DEMO (board layer define); BOARD_BUNNY_DEMO builds
+ * bunny_demo.c instead.
  *---------------------------------------------------------------------------*/
+
+#ifdef BOARD_FACE_DEMO
 
 #include <math.h>
 #include <stdint.h>
@@ -603,3 +608,5 @@ void face_demo_loop(void)
         }
     }
 }
+
+#endif /* BOARD_FACE_DEMO */

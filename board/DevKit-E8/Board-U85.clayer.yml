@@ -29,7 +29,9 @@ layer:
   define:
     - CMSIS_target_header: \"DevKit-E8.h\"
     - ETHOSU85
-    - BOARD_FACE_DEMO
+    # Which demo face_demo_loop / bunny_demo_loop runs: BOARD_FACE_DEMO (camera + face
+    # generator, needs the 1x16 model) or BOARD_BUNNY_DEMO (bunny companion, 1x30 model)
+    - BOARD_BUNNY_DEMO
     # Settings the 2.2.1 I2C driver expects but the 2.2.0 RTE_Device.h lacks (pack defaults)
     - RTE_I2C0_SCL_STUCK_LOW_TIMEOUT: 1000000
     - RTE_I2C0_SDA_STUCK_LOW_TIMEOUT: 1000000
@@ -108,6 +110,9 @@ layer:
         - file: ./ethos_setup.c
         - file: ./retarget_stdio.c
         - file: ./face_demo.c
+        - file: ./bunny_demo.c
+        - file: ./bunny_clips.c
+        - file: ./bunny_clips.h
         - file: ./display.c
         - file: ./display.h
         - file: ./camera.c
