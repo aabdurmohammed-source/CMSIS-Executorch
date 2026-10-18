@@ -379,11 +379,11 @@ static void build_tables(void)
  * pixel (at NN resolution, so ~4-5 px on screen). Runs on the small NN image. */
 #define LINE_LUM_DARK   60.0f   /* luminance treated as fully "line"            */
 #define LINE_LUM_LIGHT  150.0f  /* luminance above this is not line at all      */
-#define LINE_DARKEN     0.75f   /* 0..1: how far line pixels move to LINE_RGB   */
+#define LINE_DARKEN     0.88f   /* 0..1: how far line pixels move to LINE_RGB   */
 #define LINE_THICKEN    0.65f   /* 0..1: how much a dark neighbour darkens a pixel */
-#define LINE_R 34
-#define LINE_G 16
-#define LINE_B 50
+#define LINE_R 24
+#define LINE_G 10
+#define LINE_B 36
 
 static void convert_output(const float *out)
 {
