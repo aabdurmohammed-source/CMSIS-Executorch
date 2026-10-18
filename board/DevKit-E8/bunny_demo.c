@@ -36,6 +36,27 @@
 #include "imu.h"
 #include "bunny_clips.h"
 #include "se_services_port.h"
+#include "Driver_WDT.h"
+
+extern ARM_DRIVER_WDT Driver_WDT0;
+extern uint32_t Image$$ARM_LIB_STACK$$ZI$$Base[];
+extern uint32_t Image$$ARM_LIB_STACK$$ZI$$Limit[];
+#define WATCHDOG_MS     3000    /* loop stuck this long -> the chip resets itself */
+#define STACK_PAINT     0xA5A5A5A5u
+
+/* Fill the unused stack with a pattern; stack_used() then finds the deepest use */
+static void stack_paint(void)
+{
+    uint32_t *p = Image$$ARM_LIB_STACK$$ZI$$Base, *sp = (uint32_t *)__get_MSP();
+    while (p < sp - 64) *p++ = STACK_PAINT;
+}
+
+static uint32_t stack_used(void)
+{
+    uint32_t *base = Image$$ARM_LIB_STACK$$ZI$$Base, *p = base;
+    while (*p == STACK_PAINT) ++p;
+    return (uint32_t)((uint8_t *)Image$$ARM_LIB_STACK$$ZI$$Limit - (uint8_t *)p);
+}
 
 extern int nn_forward(const float *in, int n_in, const float **out, int *n_out);
 
@@ -358,24 +379,28 @@ static void draw_sprite(int ox, int oy, int flip)
 {
     uint8_t *fb = display_buffer();
     int w = display_width(), h = display_height(), bpp = display_bytes_per_pixel();
+    static uint8_t vrow[MAX_NN * 3];
+    /* visible x range of the sprite */
+    int x_lo = ox < 0 ? -ox : 0, x_hi = ox + spr > w ? w - ox : spr;
     for (int y = 0; y < spr; ++y) {
         int sy = oy + y;
         if (sy < 0 || sy >= h) continue;
+        /* vertical blend once per row, then only the horizontal blend per pixel */
         const uint8_t *r0 = src_rgb + (size_t)tab_i0[y] * nn_side * 3;
         const uint8_t *r1 = r0 + nn_side * 3;
-        uint32_t wy = tab_w[y];
-        for (int x = 0; x < spr; ++x) {
-            int sx = ox + (flip ? spr - 1 - x : x);
-            if (sx < 0 || sx >= w) continue;
-            int xi = tab_i0[x] * 3;
-            uint32_t wx = tab_w[x];
-            uint8_t c[3];
-            for (int k = 0; k < 3; ++k) {
-                uint32_t top = r0[xi + k] * (256 - wx) + r0[xi + 3 + k] * wx;
-                uint32_t bot = r1[xi + k] * (256 - wx) + r1[xi + 3 + k] * wx;
-                c[k] = (uint8_t)(((top >> 8) * (256 - wy) + (bot >> 8) * wy) >> 8);
-            }
-            write_px(fb + ((size_t)sy * (size_t)w + (size_t)sx) * (size_t)bpp, bpp, c[0], c[1], c[2]);
+        uint32_t wy = tab_w[y], wy0 = 256 - wy;
+        for (int k = 0; k < nn_side * 3; ++k) {
+            vrow[k] = (uint8_t)((r0[k] * wy0 + r1[k] * wy) >> 8);
+        }
+        uint8_t *row = fb + (size_t)sy * (size_t)w * (size_t)bpp;
+        for (int x = x_lo; x < x_hi; ++x) {
+            int src_x = flip ? spr - 1 - x : x;
+            const uint8_t *v = vrow + tab_i0[src_x] * 3;
+            uint32_t wx = tab_w[src_x], wx0 = 256 - wx;
+            uint8_t r = (uint8_t)((v[0] * wx0 + v[3] * wx) >> 8);
+            uint8_t g = (uint8_t)((v[1] * wx0 + v[4] * wx) >> 8);
+            uint8_t b = (uint8_t)((v[2] * wx0 + v[5] * wx) >> 8);
+            write_px(row + (size_t)(ox + x) * (size_t)bpp, bpp, r, g, b);
         }
     }
 }
@@ -563,6 +588,12 @@ void bunny_demo_loop(void)
     rect_t prev = {0, 0, 0, 0}, prev_dot = {0, 0, 0, 0};
     uint32_t t_prev = DWT->CYCCNT, t_stat = t_prev;
 
+    stack_paint();
+    int wdt_rc = Driver_WDT0.Initialize(WATCHDOG_MS);
+    if (wdt_rc == ARM_DRIVER_OK) wdt_rc = Driver_WDT0.PowerControl(ARM_POWER_FULL);
+    if (wdt_rc == ARM_DRIVER_OK) wdt_rc = Driver_WDT0.Control(ARM_WATCHDOG_UNLOCK, 0);
+    if (wdt_rc == ARM_DRIVER_OK) wdt_rc = Driver_WDT0.Start();
+    printf("bunny: watchdog %d ms -> %d\n", WATCHDOG_MS, wdt_rc);
     printf("bunny: running\n");
     for (;;) {
         uint32_t now = DWT->CYCCNT;
@@ -802,6 +833,7 @@ void bunny_demo_loop(void)
         }
         draw_graph(w, h);
         display_flush();
+        if (wdt_rc == ARM_DRIVER_OK) Driver_WDT0.Feed();
         us_draw = us_since(st3);
         if (us_since(st0) > SLOW_FRAME_MS * 1000u) {
             printf("slow frame %lu: touch %lu us, imu %lu us, mic %lu us, nn %lu us, draw %lu us\n",
@@ -822,9 +854,9 @@ void bunny_demo_loop(void)
             g_bunny_nn_us = nn_us_acc / 60;
             t_stat = t1;
             nn_us_acc = 0;
-            printf("bunny: %lu fps, NN %lu us, state %s, clip %s, imu %d, mic %d dB\n",
+            printf("bunny: %lu fps, NN %lu us, state %s, clip %s, imu %d, mic %d dB, stack %lu B\n",
                    (unsigned long)g_bunny_fps, (unsigned long)g_bunny_nn_us, state_names[st],
-                   bunny_clip_name(clip), (int)motion, (int)graph_db[GRAPH_N - 1]);
+                   bunny_clip_name(clip), (int)motion, (int)graph_db[GRAPH_N - 1], (unsigned long)stack_used());
         }
     }
 }

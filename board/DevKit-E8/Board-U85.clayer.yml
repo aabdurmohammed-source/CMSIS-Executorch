@@ -91,6 +91,7 @@ layer:
     - component: Device:SOC Peripherals:MIPI CSI2
     - component: Device:SOC Peripherals:PDM
     - component: Device:SOC Peripherals:I3C
+    - component: Device:SOC Peripherals:WDT
     - component: BSP:External peripherals:BMI323
 
     - component: Machine Learning:NPU Support:Ethos-U Driver&Generic U85
