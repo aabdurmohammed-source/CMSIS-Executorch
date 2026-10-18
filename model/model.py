@@ -46,7 +46,7 @@ def get_model(input_shape: tuple[int, ...] = INPUT_SHAPE) -> torch.nn.Module:
             print(f"[model] BunnyDecoder {size}x{size} width {width:g}: {weights.name}")
         else:
             print(f"[model] BunnyDecoder {size}x{size} width {width:g}: no {weights.name}, RANDOM weights")
-        return model.eval()
+        return model.prepare_for_int8().eval()
     model = FaceDecoder()
     model.load_state_dict(torch.load(HERE / "face_decoder.pt", map_location="cpu"))
     return model.eval()

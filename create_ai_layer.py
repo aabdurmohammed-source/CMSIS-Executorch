@@ -186,6 +186,7 @@ def export_model(spec, params: dict) -> bytes:
     import torch
     from executorch.backends.arm.ethosu import EthosUPartitioner
     from executorch.backends.arm.quantizer import EthosUQuantizer, get_symmetric_quantization_config
+    from executorch.backends.arm.quantizer.arm_quantizer import get_symmetric_a16w8_quantization_config
     from executorch.exir import EdgeCompileConfig, ExecutorchBackendConfig, to_edge_transform_and_lower
     from torchao.quantization.pt2e.quantize_pt2e import convert_pt2e, prepare_pt2e
 
@@ -200,7 +201,13 @@ def export_model(spec, params: dict) -> bytes:
     # Quantize the whole graph so the partitioner can move every node into the
     # Ethos-U delegate; only a float<->int8 boundary stays on the CPU.
     quantizer = EthosUQuantizer(spec)
-    quantizer.set_global(get_symmetric_quantization_config(is_per_channel=True))
+    # AI_LAYER_A16W8=1: 16-bit activations, 8-bit weights. Image generators need
+    # it: with 8-bit activations their colours round to a few levels.
+    if os.environ.get("AI_LAYER_A16W8") == "1":
+        print("[ai_layer] quantization: 16-bit activations, 8-bit weights (a16w8)")
+        quantizer.set_global(get_symmetric_a16w8_quantization_config(is_per_channel=True))
+    else:
+        quantizer.set_global(get_symmetric_quantization_config(is_per_channel=True))
     prepared = prepare_pt2e(graph, quantizer)
     with torch.no_grad():
         for sample in samples:

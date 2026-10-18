@@ -14,6 +14,7 @@ import torch
 from torch import nn
 
 NDIAL = 30
+LOGIT_CLAMP = 6.0  # see forward()
 BASE_CHANNELS = (128, 96, 64, 32)
 
 
@@ -34,10 +35,28 @@ class BunnyDecoder(nn.Module):
             cin = cout
         self.up = nn.Sequential(*blocks)
         self.out = nn.Conv2d(cin, 3, 3, padding=1)
+        self.int8_head = False  # see prepare_for_int8()
+        self.register_buffer("logit_shift", torch.full((1, 3, 1, 1), LOGIT_CLAMP), persistent=False)
 
     def forward(self, dials: torch.Tensor) -> torch.Tensor:
         h = self.fc(dials).reshape(-1, self.c0, self.start, self.start)
-        return torch.sigmoid(self.out(self.up(h)))
+        # Clamp the logits before the sigmoid: training drives the white background
+        # to huge logits (up to ~1800), and int8 then has to span that whole range,
+        # which rounds every colour to grey. Past +-6 the sigmoid is white/dark anyway.
+        z = self.out(self.up(h))
+        if self.int8_head:
+            # same maths, in the form the Arm quantizer fuses into the conv (a clamp
+            # starting at 0), so int8 spans only 0..12: bias was shifted by +6
+            return torch.sigmoid(nn.functional.hardtanh(z, 0.0, 2 * LOGIT_CLAMP) - self.logit_shift)
+        return torch.sigmoid(torch.clamp(z, -LOGIT_CLAMP, LOGIT_CLAMP))
+
+    def prepare_for_int8(self) -> "BunnyDecoder":
+        """Switch the head to the quantizer-friendly form (call once, after loading weights)."""
+        if not self.int8_head:
+            with torch.no_grad():
+                self.out.bias += LOGIT_CLAMP
+            self.int8_head = True
+        return self
 
 
 def scalar_ranges():

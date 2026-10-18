@@ -148,3 +148,11 @@ Branch `bunny` (from working-checkpoint 432c0e53). Kit + data in model/bunny/ (t
 - Camera frames are ALL ZERO (capture completes without errors). Same symptom as this morning's loose camera cable (J16, underside) -> check the cable.
 - Continuous CaptureVideo gave a CPI bus error and broke the NN (1 us = forward failing) -> not used. Snapshot capture started early and collected at draw time instead (snapshot mode measured 14 fps when blocking; video mode 33 fps).
 - Last build (async snapshot) is built but NOT flashed: J-Link "Attach to CPU failed" -> needs a USB power cycle.
+
+## Bunny colour bug FIXED (Sat Oct 17, night)
+- Symptom: on the board the bunny was flat grey with saturated blue blobs (not a panel issue: the framebuffer had the same pixels).
+- Cause: the int8 model output had only 2 distinct values (0.5 and 1.0). Training drove the white background's final-conv logits up to ~1774 while colours live in about -2..+2, so int8 (per-tensor, 256 steps) rounded every colour to sigmoid(0) = grey. Then the remaining speckle came from 8-bit activations in the middle layers.
+- Fix 1 (model/bunny_decoder.py): sigmoid(clamp(logits, -6, 6)); for export prepare_for_int8() shifts the last conv bias by +6 and uses hardtanh(0, 12) - 6, the form the Arm quantizer fuses into the conv. No retraining: same maths for the trained weights. model.py calls it.
+- Fix 2 (create_ai_layer.py): AI_LAYER_A16W8=1 = 16-bit activations, 8-bit weights. Float-vs-quantized mean abs error 0.037 -> 0.003 (int8 head-fixed) ; visually identical to float.
+- Export: `AI_LAYER_A16W8=1 BUNNY_SIZE=64 .venv/Scripts/python.exe create_ai_layer.py cmsis-executorch.cbuild-mlops.yml` -> 13/13 ops on the U85, 364 KB weights, 385 KB scratch, 2.12 ms/frame on the board (was 1.42 ms in int8), 32 fps loop.
+- Applies to any new bunny size (e.g. the 128x128 run): same export command, no training change.
